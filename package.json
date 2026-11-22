@@ -73,7 +73,19 @@
     "dsh-coding",
     "coding-agent"
   ],
-  "author": "ygzhang",
+  "author": {
+    "name": "ygzhang",
+    "email": "ygzhang.cn@msn.com",
+    "url": "https://github.com/ygzhang-lab"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ygzhang-lab/dsh-coding.git"
+  },
+  "homepage": "https://github.com/ygzhang-lab/dsh-coding#readme",
+  "bugs": {
+    "url": "https://github.com/ygzhang-lab/dsh-coding/issues"
+  },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
