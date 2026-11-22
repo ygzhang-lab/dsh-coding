@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "DSH Coding agent",
+    "description": "A coding-agent runtime for DSH: it borrows Claude's task-orchestration mechanism and advances stage by stage through Codex's five-stage contract, with DeepSeek Pro analysing requirements and planning tasks while Flash subagents do the work — ensuring delivery quality and maximising token value.",
+    "detail": "docs/DETAIL.md"
+  }
+}
