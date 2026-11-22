@@ -1,0 +1,233 @@
+# dsh-coding bundle.
+#
+# One passive Host settings row plus three preset declarations:
+#   preset-dsh-coding            the `Coding` preset a session selects
+#   preset-dsh-coding-implement  the isolated implement worker (internal)
+#   preset-dsh-coding-verify     the isolated verify worker (internal)
+#
+# The worker presets are internal, but DSH has no hidden-preset flag, so they
+# are declared openly, ordered last, and named as workers. Their plugin lists ARE
+# the workers' tool whitelists: a subagent gets a fresh flat registration scope,
+# so the parent's tool restrictions are never inherited — the composition is the
+# only honest place to state what a worker may hold.
+- insert:
+    # Verified configuration. `implementWorkerModel` / `verifyWorkerModel` are
+    # required `provider/model` routes: a worker never falls back to the lead's
+    # model, and an unset route fails the mount instead of spending tokens.
+    - id: dsh-coding
+      name: "dsh-coding"
+      config:
+        defaultMode: auto
+        implementWorkerModel: deepseek-account/deepseek-flash
+        plannerWorkerModel: deepseek-account/deepseek-v4-pro
+        verifyWorkerModel: deepseek-account/deepseek-flash
+        # auto follows the DSH interface locale, then the host locale; zh/en pin it.
+        language: auto
+        # auto classifies each turn; low/high/max pin every turn.
+        reasoning: auto
+        # 验证失败重试预算：0 表示不限制。耗尽后允许 BLOCKED 交付，避免死循环。
+        maxVerifyAttempts: 5
+        # 连续相同失败签名上限：0 表示不限制。
+        maxSameFailure: 2
+        # 单次验证命令的最长运行时间（毫秒）；超时终止并记为失败。0 表示不限制。
+        verificationTimeoutMs: 360000
+        verificationCommands: {}
+
+    - id: preset-dsh-coding
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: dsh-coding
+        name: Coding
+        description: >-
+          DSH 编程智能体运行时：requirements→plan→implement→verify→deliver 阶段由插件强制执行，
+          implement 阶段只保留委派工具，编辑由隔离子代理完成，验证结果决定能否交付。
+          A DSH coding-agent runtime: enforced requirements→plan→implement→verify→deliver stages,
+          delegated edits from isolated worker subagents, and a verification gate before delivery.
+        order: 4
+        plugins:
+          # Identity and temperament only. The workflow contract is injected per
+          # stage by dsh-coding/preset, one fragment at a time — never as a global
+          # system prompt that the model can re-read but the runtime cannot enforce.
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: |-
+                You are the Coding agent of the DeepSeek Harness (DSH): a pragmatic senior software engineer assigned to this repository. {{model}} is the model behind you; DSH supplies the workspace, the tools, and this session.
+
+                What you optimize for:
+                - Ground truth over recall. Inspect the real file, run the real command, read the real error before deciding. Never claim a check you did not run.
+                - The smallest correct change. Reuse existing patterns, functions, and types; add no abstraction, dependency, or drive-by refactor the task does not need.
+                - A user who is better informed after every turn. Say plainly what you did, what you found, what you could not verify, and what you need next.
+
+                How you show up: direct, concrete, calm. No flattery, no filler, no self-narration. Short sentences with real paths, commands, and file:line references instead of pasted walls of text. Admit a mistake or a dead end quickly.
+
+                The runtime below enforces the coding rhythm: it decides which stage you are in, which tools you may use, and whether verification passed. Treat a refusal as the rule, not as a suggestion to work around.
+              includeRuntimeContext: true
+
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536
+
+          - id: tool-bash
+            name: "@deepseek-ai/dsh-tool-bash"
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: "@deepseek-ai/dsh-tool-pwsh"
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              # `apply_patch` here would be the built-in editor; the Coding runtime
+              # registers the Codex-format editor itself so the lead can lose it.
+              applyPatch: false
+          - id: tool-fs-search
+            name: "@deepseek-ai/dsh-tool-fs-search"
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: "@deepseek-ai/dsh-tool-jobs"
+          - id: tool-todo
+            name: "@deepseek-ai/dsh-tool-todo"
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: "@deepseek-ai/dsh-tool-web"
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+
+          - id: skill-filesystem
+            name: "@deepseek-ai/dsh-skill-filesystem"
+          - id: tool-skill
+            name: "@deepseek-ai/dsh-tool-skill"
+
+          # The Codex patch editor. The stage gate refuses it outside a stage
+          # that admits writes, and `implement` also removes it from the table.
+          - id: dsh-coding-editor
+            name: "dsh-coding/editor"
+
+          # The enforced runtime: stage machine, dual gate, delegation tools,
+          # structured verification, per-stage contract injection.
+          - id: dsh-coding-preset
+            name: "dsh-coding/preset"
+
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: "@deepseek-ai/dsh-compaction-basic"
+                config:
+                  auto: false
+              - id: command-compact
+                name: "@deepseek-ai/dsh-command-compact"
+              - id: tool-result-pruner
+                name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    # Planner worker: read + search + web only. It explores the project and
+    # produces a single-purpose task list; it cannot edit, run a shell, or
+    # delegate further.
+    - id: preset-dsh-coding-planner
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: dsh-coding-planner
+        name: Coding planner worker
+        description: >-
+          Internal worker of the Coding preset: explores the workspace and returns a
+          single-purpose task list from the requirement. Dispatched by delegate_plan.
+        order: 89
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: |-
+                You are the planner worker of the DSH Coding runtime. You have a fresh context: the delegating agent's requirement is complete on its own. Explore the workspace with read, glob, grep, and web; you may not edit files, run a shell, or delegate further. Produce a plan of single-purpose sub-tasks, each doing exactly one thing.
+              includeRuntimeContext: false
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              applyPatch: false
+              write: false
+              edit: false
+          - id: tool-fs-search
+            name: "@deepseek-ai/dsh-tool-fs-search"
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-web
+            name: "@deepseek-ai/dsh-tool-web"
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+
+    # Implement worker: read, search, write, edit, and the Codex apply_patch
+    # editor. No shell, no web, no delegation — it cannot widen its own scope.
+    - id: preset-dsh-coding-implement
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: dsh-coding-implement
+        name: Coding implement worker
+        description: >-
+          Internal worker of the Coding preset: edits files from a self-contained brief and
+          reports the files it changed. Dispatched by delegate_implement.
+        order: 90
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: |-
+                You are the implement worker of the DSH Coding runtime. You have a fresh context: the delegating agent's brief is complete on its own. You may read, search, and edit files; you may not run shell commands, use the web, or delegate further.
+
+                Work in small, reviewable edits: read before you write, change only what the brief needs, and never commit, push, or tag. When you are done, report through structured_output — the files you changed are the evidence the lead verifies.
+              includeRuntimeContext: false
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              applyPatch: false
+              write: true
+              edit: true
+          - id: tool-fs-search
+            name: "@deepseek-ai/dsh-tool-fs-search"
+            config:
+              sampleOverCapGlobResults: false
+          - id: dsh-coding-editor
+            name: "dsh-coding/editor"
+
+    # Verify worker: read-only. `run_verification` is its only way to execute
+    # anything, and that tool cannot write a file.
+    - id: preset-dsh-coding-verify
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: dsh-coding-verify
+        name: Coding verify worker
+        description: >-
+          Internal worker of the Coding preset: runs checks read-only and reports findings with
+          evidence. Dispatched by delegate_verify.
+        order: 91
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: |-
+                You are the verify worker of the DSH Coding runtime. You hold no edit tool: you read files, search them, and run checks through run_verification. Never claim a passing check you did not run; report findings with file:line and a reproducible scenario, ordered by impact.
+              includeRuntimeContext: false
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              applyPatch: false
+              write: false
+              edit: false
+              readImage: false
+          - id: tool-fs-search
+            name: "@deepseek-ai/dsh-tool-fs-search"
+            config:
+              sampleOverCapGlobResults: false
+          - id: dsh-coding-verifier
+            name: "dsh-coding/verifier"

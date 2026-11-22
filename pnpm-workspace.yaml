@@ -1,0 +1,4 @@
+allowBuilds:
+  esbuild: true
+# pnpm reads build-script permissions from here (the package.json `pnpm` field
+# is ignored since pnpm 11). esbuild's install script downloads its binary.
