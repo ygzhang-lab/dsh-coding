@@ -1,0 +1,7 @@
+# Overlay for the isolated mount probe: give a base-only probe profile the
+# preset registry and make the Coding preset the default it resolves.
+- insert:
+    - id: agent-preset-registry
+      name: "@deepseek-ai/dsh-agent-preset-registry"
+      config:
+        default: dsh-coding
