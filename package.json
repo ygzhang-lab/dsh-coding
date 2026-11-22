@@ -1,0 +1,122 @@
+{
+  "name": "dsh-coding",
+  "version": "0.1.1-rc1",
+  "description": "DSH 编程智能体运行时插件，借鉴 Claude 任务编排机制，Codex 五段式契约层层推进，DeepSeek Pro 分析需求、编排任务，Flash 子智能体去干活，确保任务交付质量和 Token 价值最大化。A coding-agent runtime for DSH: it borrows Claude's task-orchestration mechanism and advances stage by stage through Codex's five-stage contract, with DeepSeek Pro analysing requirements and planning tasks while Flash subagents do the work — ensuring delivery quality and maximising token value.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./preset": {
+      "types": "./lib/types/preset.d.ts",
+      "default": "./lib/preset.js"
+    },
+    "./editor": {
+      "types": "./lib/types/editor.d.ts",
+      "default": "./lib/editor.js"
+    },
+    "./verifier": {
+      "types": "./lib/types/verifier.d.ts",
+      "default": "./lib/verifier.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "pnpm build && node --test --test-timeout=120000 test/*.test.mjs",
+    "prepublishOnly": "pnpm typecheck && pnpm build && pnpm test"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-preset",
+    "dsh-coding",
+    "coding-agent"
+  ],
+  "author": "ygzhang",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.2-rc.5 <0.3.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.5 <5",
+    "@deepseek-ai/dsh-agent": ">=0.2.2-rc.5 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.5 <0.3.0",
+    "@deepseek-ai/dsh-session": ">=0.2.2-rc.5 <0.3.0",
+    "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.5 <0.3.0",
+    "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.5 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-session-projection": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-subagent": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-util-values": "0.2.2-rc.5",
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.3.0",
+    "esbuild": "^0.25.0",
+    "js-yaml": "^5.5.0",
+    "react": "^18.3.1",
+    "typescript": "^5.9.0"
+  },
+  "packageManager": "pnpm@12.16.1"
+}
