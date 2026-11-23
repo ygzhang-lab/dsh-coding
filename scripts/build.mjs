@@ -28,6 +28,23 @@ const lib = join(root, 'lib')
 const staging = join(root, '.lib-build')
 const backup = join(root, '.lib-backup')
 
+/**
+ * 原子换入时的目录重命名。
+ * Windows 上杀毒软件或文件监视可能短暂持有刚写入的目录句柄，让 rename 抛出
+ * EPERM/EBUSY/EACCES；退避重试即可，不需要放弃原子替换。
+ */
+async function renameWithRetry(from, to, attempts = 10) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await rename(from, to)
+    } catch (error) {
+      const retryable = error?.code === 'EPERM' || error?.code === 'EBUSY' || error?.code === 'EACCES'
+      if (!retryable || attempt >= attempts) throw error
+      await new Promise(resolve => setTimeout(resolve, 100 * attempt))
+    }
+  }
+}
+
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 const packageName = manifest.name
 
@@ -91,11 +108,11 @@ ${clientCode}
   // 4. Swap in only after everything succeeded; keep a fallback on failure.
   await rm(backup, { recursive: true, force: true })
   const hadLib = existsSync(lib)
-  if (hadLib) await rename(lib, backup)
+  if (hadLib) await renameWithRetry(lib, backup)
   try {
-    await rename(staging, lib)
+    await renameWithRetry(staging, lib)
   } catch (error) {
-    if (hadLib) await rename(backup, lib)
+    if (hadLib) await renameWithRetry(backup, lib)
     throw error
   }
   await rm(backup, { recursive: true, force: true })
