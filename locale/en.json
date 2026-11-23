@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "DSH Coding agent",
-    "description": "A coding-agent runtime for DSH: it borrows Claude's task-orchestration mechanism and advances stage by stage through Codex's five-stage contract, with DeepSeek Pro analysing requirements and planning tasks while Flash subagents do the work — ensuring delivery quality and maximising token value.",
-    "detail": "docs/DETAIL.md"
+    "description": "DSH programming intelligent agent plugin, engineering task orchestration mechanism, Codex five-stage contract progressing layer by layer, Pro model responsible for analyzing requirements/orchestrating tasks, delegating to sub-agents to isolate various tasks and using Flash model to perform work, ensuring task delivery quality and maximizing Token value.",
+    "detail": "README.md"
   }
 }
