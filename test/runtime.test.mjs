@@ -39,6 +39,20 @@ async function createHarness(options = {}) {
   const activations = []
   let exitCode = options.exitCode ?? 1
 
+  // The handoff-document writer is the only consumer of the injected fs
+  // service, so a fake records what the Host would have written; `fs: null`
+  // models a Host that exposes no filesystem service at all.
+  const writes = []
+  const fsService = {
+    async resolve(path) {
+      return { targetKey: path, displayPath: `D:/proj/${path}` }
+    },
+    async writeText(target, content, expected) {
+      writes.push({ target, content, expected })
+      return { operation: 'create', version: 'v1' }
+    },
+  }
+
   const tools = new Map()
   const add = (definition) => {
     tools.set(definition.name, definition)
@@ -47,6 +61,7 @@ async function createHarness(options = {}) {
 
   const ctx = {
     logger: { info() {}, warn() {}, debug() {} },
+    fs: options.fs === null ? undefined : options.fs ?? fsService,
     dshCodingRuntime: { options: { ...CONFIG } },
     subagents: {
       getProvider: () => ({ capabilities: { agentOptions: true, agentPreset: true, outputSchema: true } }),
@@ -185,7 +200,7 @@ async function createHarness(options = {}) {
   }
 
   return {
-    ctx, tools, guards, restrictions, activations, commands,
+    ctx, tools, guards, restrictions, activations, commands, writes,
     listeners, visible, preExecute, preStep, postExecute, callTool, waterfall,
     setExitCode(value) { exitCode = value },
   }
@@ -223,12 +238,37 @@ async function reachPlan(harness, agent) {
 
 /** Record a structured task list through the durable session event. */
 function writePlan(harness, agent) {
+  writePlanOf(harness, agent, ['fix the bug'])
+}
+
+/** Record a structured task list of `contents` through the durable session event. */
+function writePlanOf(harness, agent, contents) {
   for (const listener of harness.listeners.get('session/event') ?? []) {
     listener({ header: { id: agent.session.header.id } }, {
       type: 'todo/write',
       time: Date.now(),
-      data: { todos: [{ content: 'fix the bug', status: 'in_progress' }] },
+      data: { todos: contents.map((content) => ({ content, status: 'in_progress' })) },
     })
+  }
+}
+
+/** Stub the worker backend: an implement report naming `files`, and a passing verify report. */
+function stubWorkerReports(harness, files) {
+  harness.ctx.subagents.startActivation = async (spec) => {
+    harness.activations.push(spec)
+    return {
+      childId: 'child-1',
+      name: 'lead/worker',
+      messageId: 'm1',
+      result: Promise.resolve({
+        stopReason: 'completed',
+        structured: spec.agentPreset === 'dsh-coding-implement'
+          ? { ok: true, summary: 'changed the brief', files }
+          : { ok: true, summary: 'the suite passes', command: 'npm run test', kind: 'test', scope: 'package' },
+        output: [],
+      }),
+      dispose: async () => {},
+    }
   }
 }
 
@@ -351,6 +391,7 @@ test('implement: the tool table is trimmed to the delegation set', async () => {
   assert.equal(table.includes('edit'), false)
   assert.equal(table.includes('write'), false)
   assert.equal(table.includes(TOOL.implement), true)
+  assert.equal(table.includes('bash'), true, 'the lead keeps the shell during implement')
   assert.deepEqual(
     [...table].sort(),
     [...IMPLEMENT_TABLE].filter(name => harness.tools.has(name)).sort(),
@@ -359,6 +400,8 @@ test('implement: the tool table is trimmed to the delegation set', async () => {
   // Denying at dispatch is separate from hiding: both hold.
   const decision = await harness.preExecute(agent, 'apply_patch')
   assert.equal(decision.kind, 'deny')
+  const shell = await harness.preExecute(agent, 'bash')
+  assert.equal(shell.kind, 'allow', 'the lead may run its own commands while implementing')
 })
 
 test('verify and deliver admit todo_write so the task list can be closed', async () => {
@@ -592,11 +635,11 @@ test('/coding reset clears an exhausted retry budget', async () => {
   // The same blocked exit through the user command must publish the same
   // state: the session already sits in deliver, so applyStage returns early
   // and only the flag makes the status line disclose the failing check.
-  const blockedView = harness.commands[0].handler({ agent, rawInput: 'stage deliver' })
+  const blockedView = await harness.commands[0].handler({ agent, rawInput: 'stage deliver' })
   assert.equal(blockedView.kind, 'success')
   assert.match(blockedView.text, /delivery BLOCKED/)
 
-  const reset = harness.commands[0].handler({ agent, rawInput: 'reset' })
+  const reset = await harness.commands[0].handler({ agent, rawInput: 'reset' })
   assert.equal(reset.kind, 'success')
   assert.match(reset.text, /retry budget reset/)
 
@@ -674,33 +717,33 @@ test('/coding control verbs reach the agent as steering or follow-up', async () 
   const command = harness.commands[0]
   assert.equal(command.name, 'coding')
 
-  const status = command.handler({ agent, rawInput: '' })
+  const status = await command.handler({ agent, rawInput: '' })
   assert.equal(status.kind, 'success')
 
   // A gate that is not satisfied is refused, not silently accepted.
-  const refused = command.handler({ agent, rawInput: 'stage deliver' })
+  const refused = await command.handler({ agent, rawInput: 'stage deliver' })
   assert.equal(refused.kind, 'error')
   assert.match(refused.text, /verification has not passed/)
 
   // A mode switch queues a follow-up turn.
-  const switched = command.handler({ agent, rawInput: 'review' })
+  const switched = await command.handler({ agent, rawInput: 'review' })
   assert.equal(switched.kind, 'success')
   assert.equal(followed.length, 1)
   assert.equal(followed[0].source.kind, 'dsh-coding-control')
 
   // A stage move steers the live turn.
-  const moved = command.handler({ agent, rawInput: 'stage verify' })
+  const moved = await command.handler({ agent, rawInput: 'stage verify' })
   assert.equal(moved.kind, 'success')
   assert.equal(steered.length, 1)
   assert.equal(steered[0].source.kind, 'dsh-coding-control')
 
   // `set` is the silent pre-Turn path: the mode changes, no Turn starts.
-  const silent = command.handler({ agent, rawInput: 'set review' })
+  const silent = await command.handler({ agent, rawInput: 'set review' })
   assert.equal(silent.kind, 'success')
   assert.match(silent.text, /mode set to review/)
   assert.equal(followed.length, 1, 'set never queues a follow-up Turn')
   assert.equal(steered.length, 1, 'set never steers the live Turn')
-  assert.equal(command.handler({ agent, rawInput: 'set shipping' }).kind, 'error')
+  assert.equal((await command.handler({ agent, rawInput: 'set shipping' })).kind, 'error')
 })
 
 test('a misconfigured worker route fails the mount instead of inheriting the lead model', async () => {
@@ -739,7 +782,7 @@ test('a user /coding refusal reports the gate without blocking the next step', a
   await created(harness, agent)
   const command = harness.commands[0]
 
-  const result = command.handler({ agent, rawInput: 'stage implement' })
+  const result = await command.handler({ agent, rawInput: 'stage implement' })
   assert.equal(result.kind, 'error')
   assert.match(result.text, /todo_write/)
 
@@ -941,7 +984,58 @@ test('a verify worker that reports failing tests cannot satisfy the deliver gate
   assert.match(refused.reason, /verification has not passed/)
 })
 
-test('the exported preset roster hides the three worker presets and restores on dispose', async () => {
+test('a complex codex verify dispatch loads the repository-instructions preset', async () => {
+  const harness = await createHarness()
+  // One changed file and two plan items: only the sub-task count can ask for the injection.
+  stubWorkerReports(harness, ['src/a.ts'])
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlanOf(harness, agent, ['add the flag', 'cover it with a test'])
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'add the flag' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  await harness.callTool(TOOL.verify, { task: 'check the flag' }, agent)
+
+  const spec = harness.activations.at(-1)
+  assert.equal(spec.agentPreset, 'dsh-coding-verify-instructions', 'dependent sub-tasks need the repository rules')
+  assert.match(spec.prompt[0].text, /AGENTS\.md.*already injected/)
+})
+
+test('a single-task verify dispatch over one file stays on the lean preset', async () => {
+  const harness = await createHarness()
+  stubWorkerReports(harness, ['src/a.ts'])
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  await harness.callTool(TOOL.verify, { task: 'check it' }, agent)
+
+  const spec = harness.activations.at(-1)
+  assert.equal(spec.agentPreset, 'dsh-coding-verify', 'one task over one file does not earn a whole AGENTS.md')
+  assert.doesNotMatch(spec.prompt[0].text, /already injected/)
+})
+
+test('review mode keeps the lean verify preset however many tasks are listed', async () => {
+  const harness = await createHarness()
+  stubWorkerReports(harness, [])
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  const switched = await harness.callTool(TOOL.mode, { mode: 'review' }, agent)
+  assert.equal(switched.mode, 'review')
+  writePlanOf(harness, agent, ['audit the parser', 'audit the writer'])
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  assert.equal(advanced.ok, true, 'review verifies without a prior edit')
+  await harness.callTool(TOOL.verify, { task: 'check the parser' }, agent)
+
+  const spec = harness.activations.at(-1)
+  assert.equal(spec.agentPreset, 'dsh-coding-verify', 'only codex verification follows a change')
+})
+
+test('the exported preset roster hides the four worker presets and restores on dispose', async () => {
   const { filterWorkerPresets, installWorkerPresetFilter } = await import('../lib/index.js')
   const ROSTER = [
     { id: 'standard', isDefault: true },
@@ -949,6 +1043,7 @@ test('the exported preset roster hides the three worker presets and restores on 
     { id: 'dsh-coding-planner', isDefault: false },
     { id: 'dsh-coding-implement', isDefault: false },
     { id: 'dsh-coding-verify', isDefault: false },
+    { id: 'dsh-coding-verify-instructions', isDefault: false },
     { id: 'broken-preset', isDefault: false, broken: 'activation failed' },
   ]
   assert.deepEqual(
@@ -1180,4 +1275,190 @@ test('an unresolvable verification command is still recorded as evidence', async
   const text = notice.content[0].text
   assert.match(text, /验证执行|Verification/)
   assert.match(text, /verificationCommands|verificationTimeoutMs/)
+})
+
+test('the delivery record is written back by coding_handoff and enters the next step context', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-coding-delivered-'))
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { test: 'exit 1' } }))
+  const harness = await createHarness({ exitCode: 0 })
+  const agent = makeAgent(dir, harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  const run = await harness.callTool(TOOL.verification, { kind: 'test', scope: 'package' }, agent)
+  assert.equal(run.passed, true, 'the passing check opens deliver')
+  const delivered = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
+  assert.equal(delivered.ok, true)
+
+  // In deliver the model writes the record back: what shipped, and what is left.
+  const recorded = await harness.callTool(TOOL.handoff, {
+    delivered: 'turn 1: shipped the flag',
+    followUps: ['harden the parser'],
+  }, agent)
+  assert.match(recorded.digest, /delivered: turn 1: shipped the flag/)
+  assert.match(recorded.digest, /follow-ups: harden the parser/)
+  assert.equal(recorded.checkpoint.handoff.delivered, 'turn 1: shipped the flag')
+  assert.deepEqual(recorded.checkpoint.handoff.followUps, ['harden the parser'])
+
+  // The next pre-step injects the stage contract, so the record is already read.
+  const decision = await harness.preStep(agent, [])
+  assert.equal(decision.kind, 'enter')
+  const context = decision.messages
+    .flatMap((message) => message.content)
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+  assert.match(context, /delivered: turn 1: shipped the flag/, 'the contract carries the recorded delivery')
+})
+
+test('/coding memory writes the handoff document through the fs service', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-coding-memory-'))
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { test: 'exit 0' } }))
+  const harness = await createHarness({ exitCode: 0 })
+  const agent = makeAgent(dir, harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  const run = await harness.callTool(TOOL.verification, { kind: 'test', scope: 'package' }, agent)
+  assert.equal(run.passed, true, 'the passing check opens deliver')
+  const delivered = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
+  assert.equal(delivered.ok, true)
+
+  const receipt = await harness.commands[0].handler({
+    agent,
+    rawInput: 'memory',
+    signal: new AbortController().signal,
+  })
+  assert.equal(receipt.kind, 'success')
+  assert.match(receipt.text, /handoff document written:/u)
+  assert.match(receipt.text, /\.agents/u, 'the receipt names the project-relative directory')
+  assert.match(receipt.text, /\.md/u)
+
+  assert.equal(harness.writes.length, 1, 'one command writes exactly one document')
+  const write = harness.writes[0]
+  assert.match(write.target.targetKey, /\.agents[\\/]memory[\\/]session-1-\d{8}-\d{6}\.md$/u)
+  assert.deepEqual(write.expected, { kind: 'createIfAbsent' }, 'a second press never overwrites the first file')
+  const name = write.target.targetKey.split(/[\\/]/u).at(-1)
+  assert.ok(receipt.text.includes(name), 'the receipt names the file it wrote')
+  assert.match(write.content, /# Coding 任务交接文档/u)
+  assert.match(write.content, /fix the bug/u, 'the recorded goal reaches the document')
+  assert.match(write.content, /npm run test/u, 'the verification command reaches the document')
+  assert.match(write.content, /src\/a\.ts/u, 'the changed file reaches the document')
+})
+
+test('/coding memory reports a missing fs service instead of throwing', async () => {
+  const harness = await createHarness({ fs: null })
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+
+  const receipt = await harness.commands[0].handler({
+    agent,
+    rawInput: 'memory',
+    signal: new AbortController().signal,
+  })
+
+  assert.equal(receipt.kind, 'error')
+  assert.match(receipt.text, /fs service/u)
+  assert.equal(harness.writes.length, 0, 'nothing is written when the Host serves no filesystem')
+})
+
+test('codex refuses implement for a complex task list until the planner ran', async () => {
+  const harness = await createHarness()
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+
+  // Four items is over the threshold: the planner must be dispatched first.
+  writePlanOf(harness, agent, ['a', 'b', 'c', 'd'])
+  const refused = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /delegate_plan/u)
+  assert.match(refused.reason, /4 items/u, 'the refusal names the size that made the task list complex')
+  assert.equal(refused.checkpoint.planner, undefined, 'a refusal is not a planner attempt')
+
+  // Three items are a small single-file change and skip the gate.
+  writePlanOf(harness, agent, ['a', 'b', 'c'])
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(advanced.ok, true)
+})
+
+test('a failed planner dispatch still opens the gate', async () => {
+  const harness = await createHarness()
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlanOf(harness, agent, ['a', 'b', 'c', 'd'])
+
+  // The configured planner route cannot be resolved: the dispatch fails before
+  // any worker starts, and the failure must not dead-lock the codex run.
+  harness.ctx.llm.resolveModelInfo = async () => { throw new Error('no route') }
+  await assert.rejects(
+    () => harness.callTool(TOOL.plan, { task: 'plan it' }, agent),
+    /not a usable model route/u,
+  )
+  assert.equal(harness.activations.length, 0, 'the failed dispatch never started a worker')
+
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(advanced.ok, true, 'a dispatch that failed is still an attempt')
+  // The attempt rides the stage tool's own checkpoint, so a resumed lead reads
+  // it back as a recorded dispatch rather than an untried one.
+  assert.equal(advanced.checkpoint.planner.outcome, 'failed')
+  assert.equal(advanced.checkpoint.planner.route, CONFIG.plannerWorkerModel)
+})
+
+test('a lead already on the planner route skips the planner gate', async () => {
+  const harness = await createHarness()
+  const agent = makeAgent(process.cwd(), harness)
+  // CONFIG.plannerWorkerModel is this exact route: the lead is the planner.
+  agent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-v4-pro' }) }
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlanOf(harness, agent, ['a', 'b', 'c', 'd'])
+
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(advanced.ok, true)
+  assert.equal(harness.activations.length, 0, 'no planner worker is dispatched for a planner lead')
+})
+
+test('requirePlanner off skips the planner gate', async () => {
+  const harness = await createHarness()
+  harness.ctx.dshCodingRuntime.options = { ...CONFIG, requirePlanner: 'off' }
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlanOf(harness, agent, ['a', 'b', 'c', 'd'])
+
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(advanced.ok, true, 'the gate is configuration, not a hard rule')
+})
+
+test('a lead whose model selection is unreadable is not the planner', async () => {
+  const harness = await createHarness()
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlanOf(harness, agent, ['a', 'b', 'c', 'd'])
+
+  // makeAgent carries no model at all: an absent selection must read as "not
+  // the planner" and never throw out of the advance.
+  const refused = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /delegate_plan/)
+
+  agent.model = { current: () => { throw new Error('no selection yet') } }
+  const throwing = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(throwing.ok, false)
+  assert.match(throwing.reason, /delegate_plan/)
+
+  // Another model on the same provider is not the planner route either.
+  agent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  const flash = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(flash.ok, false)
+  assert.match(flash.reason, /delegate_plan/)
 })

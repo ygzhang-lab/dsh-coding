@@ -106,7 +106,10 @@ test('executes through the subprocess seam and reports the structured outcome', 
     0,
   )
   assert.equal(calls.length, 1)
-  assert.deepEqual(calls[0].argv.slice(0, 2), ['/bin/sh', '-c'])
+  // The seam runs the command through the platform shell: cmd.exe on Windows,
+  // /bin/sh elsewhere.
+  const shell = process.platform === 'win32' ? ['cmd.exe', '/d', '/s', '/c'] : ['/bin/sh', '-c']
+  assert.deepEqual(calls[0].argv, [...shell, 'pnpm test'])
   assert.equal(calls[0].cwd, '/tmp/fixture')
   assert.equal(run.passed, false)
   assert.equal(run.exitCode, 1)

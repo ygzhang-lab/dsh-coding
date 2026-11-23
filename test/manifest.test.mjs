@@ -52,12 +52,12 @@ test('display metadata is localized and names the delivered capability', async (
     assert.equal(typeof file.meta.title, 'string')
     assert.ok(file.meta.title.length > 3, `${locale} title`)
     assert.ok(file.meta.description.length > 20, `${locale} description`)
-    assert.equal(file.meta.detail, 'docs/DETAIL.md')
+    assert.equal(file.meta.detail, 'README.md')
     assert.equal(await exists(file.meta.detail), true)
   }
 })
 
-test('the patch declares the Coding preset and three explicit worker presets', async () => {
+test('the patch declares the Coding preset and four explicit worker presets', async () => {
   const patch = await readPatch()
   const rows = patch[0].insert
   assert.deepEqual(rows.map((row) => row.id), [
@@ -66,6 +66,7 @@ test('the patch declares the Coding preset and three explicit worker presets', a
     'preset-dsh-coding-planner',
     'preset-dsh-coding-implement',
     'preset-dsh-coding-verify',
+    'preset-dsh-coding-verify-instructions',
   ])
 
   const settings = rows[0]
@@ -75,6 +76,7 @@ test('the patch declares the Coding preset and three explicit worker presets', a
   assert.match(settings.config.implementWorkerModel, /^[^/\s]+\/[^/\s]+$/)
   assert.match(settings.config.plannerWorkerModel, /^[^/\s]+\/[^/\s]+$/)
   assert.equal(settings.config.plannerWorkerModel, 'deepseek-account/deepseek-v4-pro')
+  assert.equal(settings.config.requirePlanner, 'complex', 'the codex planner gate ships switched on')
   assert.match(settings.config.verifyWorkerModel, /^[^/\s]+\/[^/\s]+$/)
 
   const coding = rows[1].config
@@ -118,6 +120,7 @@ test('the settings service activates from the patch row and keeps every worker r
     verifyWorkerModel: row.config.verifyWorkerModel,
     language: row.config.language,
     reasoning: row.config.reasoning,
+    requirePlanner: row.config.requirePlanner ?? 'complex',
     maxVerifyAttempts: row.config.maxVerifyAttempts ?? 5,
     maxSameFailure: row.config.maxSameFailure ?? 2,
     verificationTimeoutMs: row.config.verificationTimeoutMs ?? 360000,
@@ -130,13 +133,16 @@ test('the implement worker whitelist is stated in its composition', async () => 
   const preset = patch[0].insert.find((row) => row.id === 'preset-dsh-coding-implement').config
   assert.equal(preset.id, 'dsh-coding-implement')
   const ids = preset.plugins.map((row) => row.id)
-  assert.deepEqual(ids, ['persona', 'tool-fs', 'tool-fs-search', 'dsh-coding-editor'])
+  assert.deepEqual(ids, ['persona', 'tool-fs', 'tool-fs-search', 'agent-instructions', 'dsh-coding-editor'])
   assert.equal(ids.includes('tool-bash'), false, 'no shell in the implement worker')
   assert.equal(ids.includes('tool-web'), false)
   const fsRow = preset.plugins.find((row) => row.id === 'tool-fs')
   assert.equal(fsRow.config.write, true)
   assert.equal(fsRow.config.edit, true)
   assert.equal(fsRow.config.applyPatch, false)
+  const instructions = preset.plugins.find((row) => row.id === 'agent-instructions')
+  assert.equal(instructions.name, '@deepseek-ai/dsh-agent-instructions')
+  assert.equal(instructions.config.maxBytes, 65536)
 })
 
 test('the verify worker is read-only apart from the structured verifier', async () => {
@@ -145,11 +151,28 @@ test('the verify worker is read-only apart from the structured verifier', async 
   assert.equal(preset.id, 'dsh-coding-verify')
   const ids = preset.plugins.map((row) => row.id)
   assert.deepEqual(ids, ['persona', 'tool-fs', 'tool-fs-search', 'dsh-coding-verifier'])
+  assert.equal(ids.includes('agent-instructions'), false, 'the lean verify preset injects no repository instructions')
   assert.equal(ids.includes('tool-bash'), false, 'verification runs through run_verification only')
   const fsRow = preset.plugins.find((row) => row.id === 'tool-fs')
   assert.equal(fsRow.config.write, false)
   assert.equal(fsRow.config.edit, false)
   assert.equal(fsRow.config.applyPatch, false)
+})
+
+test('the verify-instructions worker keeps the lean whitelist plus the injected instructions', async () => {
+  const patch = await readPatch()
+  const preset = patch[0].insert.find((row) => row.id === 'preset-dsh-coding-verify-instructions').config
+  assert.equal(preset.id, 'dsh-coding-verify-instructions')
+  assert.equal(preset.order, 92)
+  const ids = preset.plugins.map((row) => row.id)
+  assert.deepEqual(ids, ['persona', 'tool-fs', 'tool-fs-search', 'dsh-coding-verifier', 'agent-instructions'])
+  const fsRow = preset.plugins.find((row) => row.id === 'tool-fs')
+  assert.equal(fsRow.config.write, false, 'injecting instructions never widens the worker to writing')
+  assert.equal(fsRow.config.edit, false)
+  assert.equal(fsRow.config.applyPatch, false)
+  const instructions = preset.plugins.find((row) => row.id === 'agent-instructions')
+  assert.equal(instructions.name, '@deepseek-ai/dsh-agent-instructions')
+  assert.equal(instructions.config.maxBytes, 65536, 'the cap matches the main preset so instructions are not truncated')
 })
 
 test('the planner worker is read-only and holds no edit or shell tool', async () => {

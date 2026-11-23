@@ -21,7 +21,8 @@ const require = createRequire(import.meta.url)
 
 // Pure helpers of the built modules: building them into the browser bundle
 // does not mean they can only be reached through it.
-const { cardState, commandFor, verificationText, reasoningDisplay } = await import('../lib/client/card.js')
+const { cardState, commandFor, memoryCommand, verificationText, reasoningDisplay } = await import('../lib/client/card.js')
+const { en, zh } = await import('../lib/client/locales.js')
 const { pickerState, pickerCommandFor } = await import('../lib/client/mode-picker.js')
 const { commandRowOf, commandRejected } = await import('../lib/client/command-row.js')
 const {
@@ -437,12 +438,81 @@ test('card state freezes a closed turn and keeps the newest one live', () => {
     { planItems: 2, openPlanItems: 0, edits: 5 },
     'a history card keeps the numbers its turn ended with, not the live ones',
   )
+  assert.equal(newest.canMemory, false, 'the implement stage has not finished a delivery')
+  assert.equal(history.canMemory, false)
 
   assert.equal(commandFor('consult'), '/coding set consult')
   assert.equal(commandFor('review'), '/coding set review')
 
   const auto = cardState({ ...view, mode: 'auto', stage: 'requirements' }, 4)
   assert.deepEqual(auto.allowed, ['requirements'], 'auto mode exposes only the requirements stage before a choice')
+})
+
+test('the handoff button appears only on the newest completed codex delivery', () => {
+  const view = {
+    active: true,
+    mode: 'codex',
+    stage: 'implement',
+    allowedStages: ['requirements', 'plan', 'implement', 'verify', 'deliver'],
+    planItems: 3,
+    openPlanItems: 1,
+    edits: 2,
+    verification: null,
+    pending: null,
+    latest: 4,
+    turns: [
+      { turn: 4, mode: 'codex', stage: 'implement', verification: null, planItems: 3, openPlanItems: 1, edits: 2 },
+    ],
+    updatedAt: 10,
+  }
+  // An implement-stage card is not a finished run, so it offers no document.
+  assert.equal(cardState(view, 4).canMemory, false)
+
+  const completed = {
+    ...view,
+    stage: 'deliver',
+    verification: { passed: true, kind: 'test', scope: 'package', command: 'pnpm test', failedTests: [], ranAt: 2 },
+    latest: 5,
+    turns: [
+      ...view.turns,
+      {
+        turn: 5,
+        mode: 'codex',
+        stage: 'deliver',
+        verification: { passed: true, kind: 'test', scope: 'package', command: 'pnpm test', failedTests: [], ranAt: 2 },
+        planItems: 3,
+        openPlanItems: 0,
+        edits: 2,
+      },
+    ],
+  }
+  assert.equal(cardState(completed, 5).canMemory, true, 'the newest, finished codex turn can write the document')
+  assert.equal(cardState(completed, 4).canMemory, false, 'a history card gets no button')
+  const failed = {
+    ...completed,
+    verification: { passed: false, kind: 'test', scope: 'package', command: 'pnpm test', failedTests: ['adds numbers'], ranAt: 2 },
+  }
+  assert.equal(cardState(failed, 5).canMemory, false, 'a failing verification is not a finished delivery')
+  assert.equal(cardState({ ...completed, mode: 'review' }, 5).canMemory, false, 'only a codex run writes the document')
+  assert.equal(memoryCommand(), '/coding memory')
+})
+
+test('the handoff copy exists in both dictionaries', () => {
+  const keys = [
+    'card.memory',
+    'card.memoryHint',
+    'card.memoryConfirm',
+    'card.memoryCancel',
+    'card.memoryBusy',
+    'card.memoryDone',
+    'card.memoryFailed',
+  ]
+  for (const key of keys) {
+    assert.equal(typeof zh[key], 'string', `zh has ${key}`)
+    assert.notEqual(zh[key].trim(), '', `zh ${key} is not empty`)
+    assert.equal(typeof en[key], 'string', `en has ${key}`)
+    assert.notEqual(en[key].trim(), '', `en ${key} is not empty`)
+  }
 })
 
 test('the card shows only the verification status, with a readable color class', () => {

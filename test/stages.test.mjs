@@ -8,14 +8,24 @@ import {
   IMPLEMENT_TABLE,
   STAGES_BY_MODE,
   TOOL,
+  VERIFY_INSTRUCTION_FILE_THRESHOLD,
+  VERIFY_INSTRUCTION_TASK_THRESHOLD,
   asCheckpoint,
   asStage,
   entryStage,
+  needsWorkspaceInstructions,
   stageAdmits,
   stageInMode,
   toolClass,
 } from '../lib/stages.js'
 import { makeFailure } from '../lib/failures.js'
+import {
+  HANDOFF_ITEMS_LIMIT,
+  asHandoff,
+  handoffDigest,
+  handoffForWorker,
+  mergeHandoff,
+} from '../lib/handoff.js'
 import {
   applyMode,
   applyStage,
@@ -37,7 +47,10 @@ function state(mode = 'codex') {
   return createState('session-1', mode)
 }
 
-/** A recorded handoff, shaped as `coding_handoff` merges it into the state. */
+/**
+ * A recorded handoff, shaped as `coding_handoff` merges it into the state. The
+ * delivery fields stay absent / empty until the deliver stage writes them.
+ */
 function handoffOf(goal = 'fix the bug', acceptance = ['the failing test passes']) {
   return {
     version: 1,
@@ -47,6 +60,7 @@ function handoffOf(goal = 'fix the bug', acceptance = ['the failing test passes'
     findings: [],
     decisions: [],
     open: [],
+    followUps: [],
     tasks: [],
     changes: [],
     updatedAt: Date.now(),
@@ -90,6 +104,24 @@ test('mode stage sets are fixed', () => {
   assert.deepEqual(STAGES_BY_MODE.codex, ['requirements', 'plan', 'implement', 'verify', 'deliver'])
   assert.equal(entryStage('auto'), 'requirements')
   assert.equal(entryStage('codex'), 'requirements')
+})
+
+test('verify loads repository instructions only for a complex codex run', () => {
+  const demand = (mode, taskCount, changedFiles) => needsWorkspaceInstructions({ mode, taskCount, changedFiles })
+  assert.equal(demand('codex', 1, 1), false, 'one task over one file does not earn a whole AGENTS.md')
+  assert.equal(
+    demand('codex', VERIFY_INSTRUCTION_TASK_THRESHOLD, 0),
+    true,
+    'dependent sub-tasks need the repository rules',
+  )
+  assert.equal(
+    demand('codex', 0, VERIFY_INSTRUCTION_FILE_THRESHOLD),
+    true,
+    'a broad change needs the repository rules',
+  )
+  assert.equal(demand('review', 5, 5), false, 'review verifies existing behavior, so it never injects')
+  assert.equal(demand('consult', 2, 3), false)
+  assert.equal(demand('auto', 2, 3), false)
 })
 
 test('auto mode chooses a workflow from requirements with a non-blocking refusal', () => {
@@ -143,6 +175,57 @@ test('implement gate requires a structured task list', () => {
 
   current.plan = { items: [{ content: 'do the thing', status: 'in_progress' }], at: Date.now() }
   assert.equal(checkAdvance(current, 'implement').ok, true)
+})
+
+/** A four-item task list, the smallest list the planner gate calls complex. */
+function complexPlan(contents = ['a', 'b', 'c', 'd']) {
+  return { items: contents.map(content => ({ content, status: 'in_progress' })), at: Date.now() }
+}
+
+test('codex requires the planner for a complex task list', () => {
+  const current = state()
+  current.handoff = handoffOf()
+  current.plan = complexPlan()
+
+  // More than three items is the only machine-checkable complexity signal: the
+  // planner must have been dispatched before implement.
+  const refused = checkAdvance(current, 'implement')
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /delegate_plan/)
+
+  // A small single-file change (three items or fewer) skips the gate.
+  current.plan = complexPlan(['a', 'b', 'c'])
+  assert.equal(checkAdvance(current, 'implement').ok, true)
+
+  // A recorded attempt opens the gate whatever the outcome was.
+  current.plan = complexPlan()
+  current.planner = { route: 'deepseek-account/deepseek-v4-pro', outcome: 'completed', at: Date.now() }
+  assert.equal(checkAdvance(current, 'implement').ok, true)
+
+  const failedAttempt = state()
+  failedAttempt.handoff = handoffOf()
+  failedAttempt.plan = complexPlan()
+  failedAttempt.planner = { route: 'deepseek-account/deepseek-v4-pro', outcome: 'failed', at: Date.now() }
+  assert.equal(checkAdvance(failedAttempt, 'implement').ok, true, 'a failed dispatch still counts as an attempt')
+
+  // A lead that already runs the planner route needs no planner worker.
+  const leadIsPlanner = state()
+  leadIsPlanner.plan = complexPlan()
+  assert.equal(checkAdvance(leadIsPlanner, 'implement', { leadIsPlanner: true }).ok, true)
+
+  // `requirePlanner: off` switches the whole gate off.
+  const disabled = state()
+  disabled.plan = complexPlan()
+  assert.equal(checkAdvance(disabled, 'implement', { plannerGate: false }).ok, true)
+})
+
+test('the planner gate never replaces the mode stage set', () => {
+  const current = state('consult')
+  current.plan = complexPlan()
+  const refused = checkAdvance(current, 'implement')
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /not part of consult mode/, 'the stage-set refusal wins')
+  assert.doesNotMatch(refused.reason, /delegate_plan/)
 })
 
 test('verify gate requires a landed worker edit', () => {
@@ -214,6 +297,8 @@ test('the implement table is exactly the delegation set', () => {
   assert.deepEqual([...tableTrim('implement')].sort(), [...IMPLEMENT_TABLE].sort())
   assert.equal(IMPLEMENT_TABLE.includes(TOOL.implement), true)
   assert.equal(IMPLEMENT_TABLE.includes(TOOL.handoff), true, 'the handoff verb survives the trim')
+  assert.equal(IMPLEMENT_TABLE.includes('bash'), true, 'the lead keeps a shell while implementing')
+  assert.equal(IMPLEMENT_TABLE.includes('pwsh'), true, 'the Windows shell stays in the table too')
   assert.equal(IMPLEMENT_TABLE.includes('apply_patch'), false)
   assert.equal(IMPLEMENT_TABLE.includes('edit'), false)
   assert.equal(IMPLEMENT_TABLE.includes('write'), false)
@@ -228,9 +313,29 @@ test('stage admissions stay in sync with the tool classes', () => {
   assert.equal(stageAdmits('verify', 'verify'), true)
   assert.equal(stageAdmits('verify', 'write'), false)
   assert.equal(stageAdmits('deliver', 'write'), false)
+  assert.equal(stageAdmits('implement', 'exec'), true, 'the lead runs installs and git itself')
+  assert.equal(stageAdmits('verify', 'exec'), true, 'verify may reproduce a failure directly')
+  assert.equal(stageAdmits('deliver', 'exec'), false, 'delivery reports without running commands')
   assert.equal(stageAdmits('verify', 'plan'), true, 'verify can close a finished step')
   assert.equal(stageAdmits('deliver', 'plan'), true, 'deliver can close the last step')
   assert.equal(stageAdmits('requirements', 'plan'), false, 'the plan gate still starts in plan')
+})
+
+test('the lead holds a shell in implement and verify but not in deliver', () => {
+  const implement = state()
+  implement.stage = 'implement'
+  assert.equal(checkTool(implement, 'bash').deny, undefined)
+  assert.equal(checkTool(implement, 'pwsh').deny, undefined)
+
+  const verify = state()
+  verify.stage = 'verify'
+  assert.equal(checkTool(verify, 'bash').deny, undefined)
+
+  const deliver = state()
+  deliver.stage = 'deliver'
+  const denied = checkTool(deliver, 'bash').deny
+  assert.equal(typeof denied, 'string')
+  assert.ok(denied.includes('run_verification'), denied)
 })
 
 test('verify and deliver admit todo_write but requirements does not', () => {
@@ -411,6 +516,54 @@ test('a checkpoint accepts a plan worker record', () => {
   assert.equal(checkpoint.worker.role, 'plan')
 })
 
+test('a checkpoint carries the planner attempt and rejects a malformed one', () => {
+  const current = state()
+  current.planner = { route: 'deepseek-account/deepseek-v4-pro', outcome: 'completed', at: 42 }
+  const checkpoint = checkpointOf(current)
+  assert.deepEqual(checkpoint.planner, current.planner)
+
+  // The checkpoint is durable JSON: the attempt must survive the round trip,
+  // or a resumed session would ask for the planner a second time.
+  const parsed = asCheckpoint(JSON.parse(JSON.stringify(checkpoint)))
+  assert.ok(parsed)
+  assert.deepEqual(parsed.planner, current.planner)
+
+  // A present but illegal attempt is a corrupt checkpoint, unlike an absent one.
+  assert.equal(asCheckpoint({ ...checkpoint, planner: { route: 1 } }), undefined)
+  assert.equal(asCheckpoint({ ...checkpoint, planner: { route: 'x', outcome: 'done', at: 1 } }), undefined)
+  assert.equal(asCheckpoint({ ...checkpoint, planner: { route: 'x', outcome: 'failed', at: 'x' } }), undefined)
+
+  // A checkpoint written before `planner` existed reads as "never attempted".
+  const legacy = { ...checkpoint }
+  delete legacy.planner
+  assert.equal('planner' in asCheckpoint(legacy), false)
+
+  // A session that never dispatched the planner emits no such field at all, so
+  // the gate stays closed only by the missing attempt, never by a null record.
+  const plain = JSON.parse(JSON.stringify(checkpointOf(state())))
+  const parsedPlain = asCheckpoint(plain)
+  assert.ok(parsedPlain, 'a checkpoint without a planner attempt still parses')
+  assert.equal('planner' in parsedPlain, false)
+})
+
+test('restoring a checkpoint resumes the recorded planner attempt', () => {
+  const recorded = state('codex')
+  recorded.planner = { route: 'deepseek-account/deepseek-v4-pro', outcome: 'failed', at: 77 }
+
+  const current = state('codex')
+  restoreFromView(current, {
+    mode: 'codex',
+    stage: 'plan',
+    updatedAt: 80,
+    plan: complexPlan().items,
+    checkpoint: asCheckpoint(checkpointOf(recorded)),
+  })
+  assert.equal(current.stage, 'plan')
+  assert.deepEqual(current.planner, recorded.planner)
+  assert.match(statusLine(current), /planner failed/)
+  assert.equal(checkAdvance(current, 'implement').ok, true, 'the resumed attempt keeps the gate open')
+})
+
 test('codex plan gate requires a recorded goal', () => {
   const current = state()
   current.requirementsObserved = 2
@@ -568,4 +721,68 @@ test('checkpoint carries the latest failure', () => {
   const legacy = { ...checkpoint }
   delete legacy.failure
   assert.equal('failure' in asCheckpoint(legacy), false)
+})
+
+test('delivered overwrites the previous delivery record and an empty string clears it', () => {
+  const base = mergeHandoff(undefined, { goal: 'g', delivered: 'turn 1: shipped the flag' })
+  assert.equal(base.delivered, 'turn 1: shipped the flag')
+
+  const refined = mergeHandoff(base, { delivered: 'turn 2: refined' })
+  assert.equal(refined.delivered, 'turn 2: refined', 'a later record replaces the previous delivery')
+  assert.equal(refined.goal, 'g', 'overwriting the delivery keeps the rest of the handoff')
+
+  const cleared = mergeHandoff(refined, { delivered: '' })
+  assert.equal(cleared.delivered, undefined, 'an empty string clears the delivery record')
+  assert.equal(cleared.goal, 'g', 'clearing the delivery keeps the rest of the handoff')
+})
+
+test('followUps append, de-duplicate, and keep the newest HANDOFF_ITEMS_LIMIT entries', () => {
+  const first = mergeHandoff(undefined, { goal: 'g', followUps: ['harden the parser', 'add a doc'] })
+  const twice = mergeHandoff(first, { followUps: ['add a doc', 'rerun the suite'] })
+  assert.deepEqual(twice.followUps, ['harden the parser', 'add a doc', 'rerun the suite'])
+
+  let grown = mergeHandoff(undefined, { goal: 'g' })
+  for (let index = 0; index < 15; index += 1) {
+    grown = mergeHandoff(grown, { followUps: [`item ${index}`] })
+  }
+  assert.equal(grown.followUps.length, HANDOFF_ITEMS_LIMIT)
+  assert.equal(grown.followUps.at(-1), 'item 14', 'the newest entries are the ones kept')
+})
+
+test('a record written before the delivery fields still parses', () => {
+  const legacy = asHandoff({
+    version: 1,
+    goal: 'g',
+    constraints: [],
+    acceptance: [],
+    findings: [],
+    decisions: [],
+    open: [],
+    tasks: [],
+    changes: [],
+    updatedAt: 1,
+  })
+  assert.ok(legacy, 'a record without delivered/followUps is still usable')
+  assert.equal(legacy.goal, 'g')
+  assert.equal(legacy.delivered, undefined, 'a missing delivery record reads as none')
+  assert.deepEqual(legacy.followUps, [], 'a missing follow-up list reads as empty')
+
+  assert.equal(asHandoff({ version: 2 }), undefined, 'the version check still rejects unknown shapes')
+})
+
+test('the delivery record reaches the digest and the plan/implement slices only', () => {
+  const record = mergeHandoff(undefined, {
+    goal: 'fix the bug',
+    delivered: 'turn 1: shipped the flag behind a config switch',
+    followUps: ['harden the parser'],
+  })
+
+  const digest = handoffDigest(record)
+  assert.match(digest, /delivered: /)
+  assert.match(digest, /follow-ups: /)
+  assert.match(digest, /harden the parser/)
+
+  assert.match(handoffForWorker(record, 'plan'), /Delivered:/)
+  assert.match(handoffForWorker(record, 'implement'), /Delivered:/)
+  assert.doesNotMatch(handoffForWorker(record, 'verify'), /Delivered:/)
 })
