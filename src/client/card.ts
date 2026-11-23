@@ -59,7 +59,8 @@ export interface CodingCardProps {
  * control card and a history card is testable without React.
  * @param view - current projection value.
  * @param turn - Turn the card belongs to, when the owner declares one.
- * @returns the values rendered, plus whether this card may switch the mode.
+ * @returns the values rendered, plus whether this card may switch the mode
+ *   (`live`) and whether it may write the handoff document (`canMemory`).
  */
 export function cardState(
   view: CodingStageView,
@@ -73,6 +74,7 @@ export function cardState(
   planItems: number
   openPlanItems: number
   edits: number
+  canMemory: boolean
 } {
   const turns = Array.isArray(view.turns) ? view.turns : []
   const frozen = turn === undefined ? undefined : turns.find(item => item.turn === turn)
@@ -87,9 +89,20 @@ export function cardState(
   const numbers = live || frozen === undefined
     ? { planItems: view.planItems, openPlanItems: view.openPlanItems, edits: view.edits }
     : { planItems: frozen.planItems, openPlanItems: frozen.openPlanItems, edits: frozen.edits }
+  // 只有「最新一轮 + codex + 该轮以 deliver 结束且验证通过」才提供交接文档按钮：
+  // 正常完成的轮次，不是历史轮，也不是 BLOCKED 交付。
+  const canMemory = live && mode === 'codex' && stage === 'deliver' && verification?.passed === true
   // A wire value from an older build may name a mode this build does not know;
   // fall back to the codex stage set instead of crashing the chat render.
-  return { live, mode, stage, verification, allowed: STAGES_BY_MODE[mode] ?? STAGES_BY_MODE.codex, ...numbers }
+  return {
+    live,
+    mode,
+    stage,
+    verification,
+    allowed: STAGES_BY_MODE[mode] ?? STAGES_BY_MODE.codex,
+    ...numbers,
+    canMemory,
+  }
 }
 
 /**
@@ -101,6 +114,11 @@ export function cardState(
  */
 export function commandFor(mode: CodingMode): string {
   return `/coding set ${mode}`
+}
+
+/** 生成交接文档要回流 Host 的命令行。 */
+export function memoryCommand(): string {
+  return '/coding memory'
 }
 
 /** Read the Turn number out of the owner props. */
@@ -214,10 +232,13 @@ export const CodingTurnCard = memo(function CodingTurnCard(props: CodingCardProp
   const view = raw === null || typeof raw !== 'object' ? undefined : raw as CodingStageView
   const [busy, setBusy] = useState<CodingMode | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // 交接文档的按键状态机：idle → confirm → busy → done；失败回到 idle 并给出原因。
+  const [memory, setMemory] = useState<'idle' | 'confirm' | 'busy' | 'done'>('idle')
+  const [memoryError, setMemoryError] = useState<string | null>(null)
   if (view === undefined || view.active !== true) return null
 
   const turn = turnOf(props.turn)
-  const { live, mode, stage, verification, allowed, ...numbers } = cardState(view, turn)
+  const { live, mode, stage, verification, allowed, canMemory, ...numbers } = cardState(view, turn)
   const reasoningState = reasoningRaw === null || typeof reasoningRaw !== 'object'
     ? undefined
     : reasoningRaw as ReasoningProjectionState
@@ -229,6 +250,8 @@ export const CodingTurnCard = memo(function CodingTurnCard(props: CodingCardProp
   const openPlanItems = number(numbers.openPlanItems)
   const state = verificationText(verification, t)
   const enabled = live && busy === null
+  // 模式切换失败与交接文档失败共用一个错误段落，先出现的那个优先。
+  const failure = error ?? memoryError
 
   async function choose(next: CodingMode): Promise<void> {
     if (next === mode || busy !== null || !live) return
@@ -242,6 +265,72 @@ export const CodingTurnCard = memo(function CodingTurnCard(props: CodingCardProp
     } finally {
       setBusy(null)
     }
+  }
+
+  async function writeMemory(): Promise<void> {
+    if (memory === 'busy') return
+    setMemory('busy')
+    setMemoryError(null)
+    try {
+      const result = await props.execute?.(memoryCommand())
+      // 没有注入 execute 也算失败：这一轮不该悄悄什么都不发生。
+      if (result === undefined || commandRejected(result)) {
+        setMemory('idle')
+        setMemoryError(t('card.memoryFailed'))
+      } else {
+        setMemory('done')
+      }
+    } catch {
+      setMemory('idle')
+      setMemoryError(t('card.memoryFailed'))
+    }
+  }
+
+  /** 交接文档行；`canMemory` 为假时整行不渲染。 */
+  function memoryRow(): ReactElement | null {
+    if (!canMemory) return null
+    let content: ReactElement[]
+    if (memory === 'idle') {
+      content = [h('button', {
+        key: 'memory-idle',
+        type: 'button',
+        className: 'dsh-coding-button',
+        onClick: () => setMemory('confirm'),
+      }, t('card.memory'))]
+    } else if (memory === 'confirm') {
+      content = [
+        h('span', { key: 'memory-hint', className: 'dsh-coding-hint' }, t('card.memoryHint')),
+        h('button', {
+          key: 'memory-confirm',
+          type: 'button',
+          className: 'dsh-coding-button',
+          onClick: () => { void writeMemory() },
+        }, t('card.memoryConfirm')),
+        h('button', {
+          key: 'memory-cancel',
+          type: 'button',
+          className: 'dsh-coding-button',
+          onClick: () => {
+            setMemory('idle')
+            setMemoryError(null)
+          },
+        }, t('card.memoryCancel')),
+      ]
+    } else if (memory === 'busy') {
+      content = [h('button', {
+        key: 'memory-busy',
+        type: 'button',
+        className: 'dsh-coding-button',
+        disabled: true,
+      }, t('card.memoryBusy'))]
+    } else {
+      content = [h('span', { key: 'memory-done', className: 'dsh-coding-success' }, t('card.memoryDone'))]
+    }
+    return h(
+      'div',
+      { className: 'dsh-coding-row', 'data-dsh-coding-memory': 'true' },
+      ...content,
+    )
   }
 
   return h(
@@ -327,6 +416,7 @@ export const CodingTurnCard = memo(function CodingTurnCard(props: CodingCardProp
         ? null
         : h('span', { className: 'dsh-coding-value' }, t('pending').replace('{tool}', view.pending.tool)),
     ),
-    error === null ? null : h('p', { className: 'dsh-coding-error' }, error),
+    memoryRow(),
+    failure === null ? null : h('p', { className: 'dsh-coding-error' }, failure),
   )
 })

@@ -43,6 +43,13 @@ export type CodingKey =
   | 'card.verify'
   | 'card.stageHint'
   | 'card.switchFailed'
+  | 'card.memory'
+  | 'card.memoryHint'
+  | 'card.memoryConfirm'
+  | 'card.memoryCancel'
+  | 'card.memoryBusy'
+  | 'card.memoryDone'
+  | 'card.memoryFailed'
   | 'card.stale'
   | 'card.reasoning'
   | 'reasoning.pending'
@@ -118,6 +125,13 @@ export const en: Record<CodingKey, string> = {
   'card.verify': 'Verification',
   'card.stageHint': 'Edit with /coding stage <stage>',
   'card.switchFailed': 'The mode was not changed. Try /coding <mode>.',
+  'card.memory': 'End task & write handoff',
+  'card.memoryHint': 'Writes one Markdown handoff document under .agents/memory in the project root.',
+  'card.memoryConfirm': 'Generate',
+  'card.memoryCancel': 'Cancel',
+  'card.memoryBusy': 'Writing…',
+  'card.memoryDone': 'Handoff document written',
+  'card.memoryFailed': 'Could not write the handoff document. Retry or run /coding memory.',
   'card.stale': 'history',
   'card.reasoning': 'Reasoning',
   'reasoning.pending': 'pending',
@@ -194,6 +208,13 @@ export const zh: Record<CodingKey, string> = {
   'card.verify': '验证',
   'card.stageHint': '用 /coding stage <阶段> 调整',
   'card.switchFailed': '模式未切换成功，请重试或直接执行 /coding <模式>。',
+  'card.memory': '结束任务并生成交接文档',
+  'card.memoryHint': '将在项目根 .agents/memory 下写一篇本轮交接文档。',
+  'card.memoryConfirm': '确认生成',
+  'card.memoryCancel': '取消',
+  'card.memoryBusy': '正在写入…',
+  'card.memoryDone': '已生成交接文档',
+  'card.memoryFailed': '未能生成交接文档，请重试或执行 /coding memory。',
   'card.stale': '历史',
   'card.reasoning': '推理',
   'reasoning.pending': '待确定',
