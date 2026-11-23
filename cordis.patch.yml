@@ -1,9 +1,10 @@
 # dsh-coding bundle.
 #
-# One passive Host settings row plus three preset declarations:
-#   preset-dsh-coding            the `Coding` preset a session selects
-#   preset-dsh-coding-implement  the isolated implement worker (internal)
-#   preset-dsh-coding-verify     the isolated verify worker (internal)
+# One passive Host settings row plus four preset declarations:
+#   preset-dsh-coding                       the `Coding` preset a session selects
+#   preset-dsh-coding-implement             the isolated implement worker (internal)
+#   preset-dsh-coding-verify                the isolated verify worker (internal)
+#   preset-dsh-coding-verify-instructions   the verify worker with repo instructions (internal)
 #
 # The worker presets are internal, but DSH has no hidden-preset flag, so they
 # are declared openly, ordered last, and named as workers. Their plugin lists ARE
@@ -20,6 +21,8 @@
         defaultMode: auto
         implementWorkerModel: deepseek-account/deepseek-flash
         plannerWorkerModel: deepseek-account/deepseek-v4-pro
+        # planner 门禁：complex 时 codex 复杂任务（任务单 >3 条）必须先派发 delegate_plan；off 关闭。
+        requirePlanner: complex
         verifyWorkerModel: deepseek-account/deepseek-flash
         # auto follows the DSH interface locale, then the host locale; zh/en pin it.
         language: auto
@@ -39,10 +42,9 @@
         id: dsh-coding
         name: Coding
         description: >-
-          DSH 编程智能体运行时：requirements→plan→implement→verify→deliver 阶段由插件强制执行，
-          implement 阶段只保留委派工具，编辑由隔离子代理完成，验证结果决定能否交付。
-          A DSH coding-agent runtime: enforced requirements→plan→implement→verify→deliver stages,
-          delegated edits from isolated worker subagents, and a verification gate before delivery.
+          DSH 编程智能体运行时：工程化任务编排机制，Codex 五段式契约层层推进，确保任务交付质量和 Token 价值最大化。
+          When the DSH programming intelligent agent runs, it employs an engineered task orchestration mechanism,
+          utilizing the Codex five-stage contract to progress step by step, ensuring task delivery quality and maximizing token value.
         order: 4
         plugins:
           # Identity and temperament only. The workflow contract is injected per
@@ -197,6 +199,10 @@
             name: "@deepseek-ai/dsh-tool-fs-search"
             config:
               sampleOverCapGlobResults: false
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536
           - id: dsh-coding-editor
             name: "dsh-coding/editor"
 
@@ -231,3 +237,40 @@
               sampleOverCapGlobResults: false
           - id: dsh-coding-verifier
             name: "dsh-coding/verifier"
+
+    # Verify worker with repository instructions. Dispatched only for a codex run
+    # that spans dependent sub-tasks or a broad change; a single-task check stays
+    # on the lean preset above.
+    - id: preset-dsh-coding-verify-instructions
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: dsh-coding-verify-instructions
+        name: Coding verify worker (repo instructions)
+        description: >-
+          Internal worker of the Coding preset: the verify worker with the repository
+          instructions injected. Dispatched by delegate_verify for a complex codex run.
+        order: 92
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: |-
+                You are the verify worker of the DSH Coding runtime. You hold no edit tool: you read files, search them, and run checks through run_verification. Never claim a passing check you did not run; report findings with file:line and a reproducible scenario, ordered by impact.
+              includeRuntimeContext: false
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              applyPatch: false
+              write: false
+              edit: false
+              readImage: false
+          - id: tool-fs-search
+            name: "@deepseek-ai/dsh-tool-fs-search"
+            config:
+              sampleOverCapGlobResults: false
+          - id: dsh-coding-verifier
+            name: "dsh-coding/verifier"
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536

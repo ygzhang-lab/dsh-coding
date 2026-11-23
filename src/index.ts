@@ -2,12 +2,12 @@
  * Host-side settings service of the `dsh-coding` bundle.
  *
  * This row is the bundle's only Host contribution: it owns the verified
- * configuration the Coding preset and its three worker presets read, and it
+ * configuration the Coding preset and its four worker presets read, and it
  * performs no agent work by itself. Installing the bundle therefore changes no
  * existing session; only a session that selects the Coding preset runs the
  * enforced runtime.
  *
- * It also filters this bundle's three internal worker presets out of the exported
+ * It also filters this bundle's four internal worker presets out of the exported
  * preset roster: no client offers them, while the Host roster keeps resolving
  * the compositions `delegate_implement` and `delegate_verify` dispatch to.
  *
@@ -43,6 +43,7 @@ const WORKER_PRESET_IDS: readonly string[] = [
   WORKER_PRESETS.planner,
   WORKER_PRESETS.implement,
   WORKER_PRESETS.verify,
+  WORKER_PRESETS.verifyWithInstructions,
 ]
 
 /** One roster row as the preset registry exports it. */

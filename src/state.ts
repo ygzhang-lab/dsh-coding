@@ -24,6 +24,7 @@ import {
   type CodingCheckpoint,
   type CodingMode,
   type CodingStage,
+  type PlannerAttempt,
   type StageTransition,
   type VerificationOutcome,
   type WorkerRecord,
@@ -58,6 +59,8 @@ export interface CodingState {
   /** Edit count inherited from a checkpoint that carried no `files` list. */
   baseEdits: number
   worker?: WorkerRecord
+  /** planner 派发尝试；有值即表示这个会话已经尝试过 planner（成功或失败）。 */
+  planner?: PlannerAttempt
   verification?: VerificationOutcome
   refusal?: { readonly target: CodingStage; readonly reason: string; readonly at: number }
   /** Bounded handoff record: the only context the planner and implement workers receive. */
@@ -182,6 +185,7 @@ export function restoreFromView(state: CodingState, view: RestoreView): void {
   state.verificationAttempts = checkpoint.verifyAttempts ?? 0
   state.verifyBlocked = checkpoint.verifyBlocked
   if (checkpoint.worker !== undefined) state.worker = checkpoint.worker
+  if (checkpoint.planner !== undefined) state.planner = checkpoint.planner
   state.updatedAt = Math.max(checkpoint.updatedAt, view.updatedAt)
 }
 
@@ -190,14 +194,38 @@ export function stageGuidance(mode: CodingMode): string {
   return `stages: ${stagePath(mode)}`
 }
 
+/** 强制 planner 的任务单阈值：严格大于三条即为“复杂任务”。 */
+export const PLANNER_TODO_THRESHOLD = 3
+
+/** 调用方提供的运行时事实：纯函数拿不到主 Agent 的模型与配置。 */
+export interface AdvanceOptions {
+  /** 主 Agent 自身模型就是配置的 planner 路由，planner 因此是多余的。 */
+  readonly leadIsPlanner?: boolean
+  /** 配置 `requirePlanner: 'off'` 时整条门禁关闭。 */
+  readonly plannerGate?: boolean
+}
+
+/**
+ * 是否需要先派发 planner：仅 codex、任务单超过阈值、还没有尝试过、且主 Agent
+ * 自身不是 planner 路由；配置关闭时永不要求。
+ */
+function plannerGateOpen(state: CodingState, options: AdvanceOptions): boolean {
+  if (state.mode !== 'codex') return false
+  if (options.plannerGate === false) return false
+  if (options.leadIsPlanner === true) return false
+  if (state.planner !== undefined) return false
+  return (state.plan?.items.length ?? 0) > PLANNER_TODO_THRESHOLD
+}
+
 /**
  * Decide whether the model may move to `target` now. Conditions are checked by
  * plugin code, never taken from the model's assertion.
  * @param state - live session state.
  * @param target - requested stage.
+ * @param options - 调用方提供的运行时事实（主 Agent 是否即 planner 路由、门禁是否开启）。
  * @returns whether the move is allowed, and why not when it is refused.
  */
-export function checkAdvance(state: CodingState, target: CodingStage): AdvanceCheck {
+export function checkAdvance(state: CodingState, target: CodingStage, options: AdvanceOptions = {}): AdvanceCheck {
   if (!stageInMode(state.mode, target)) {
     if (state.mode === 'auto') {
       return {
@@ -238,8 +266,21 @@ export function checkAdvance(state: CodingState, target: CodingStage): AdvanceCh
     return {
       ok: false,
       reason:
-        'no structured task list yet: call todo_write with 3-6 verifiable steps (exactly one in_progress), '
-        + 'then advance to implement.',
+        'no structured task list yet: call todo_write with 1-3 verifiable steps for a small single-file change, '
+        + 'or 4-6 for a multi-file change (exactly one in_progress), then advance to implement.',
+    }
+  }
+  // 可机器验证的复杂度判据只有一条：任务单超过三条。这个规模在 codex 下必须
+  // 先让 planner worker（pro 模型）勘探并拆分任务；派发失败也算尝试。
+  if (target === 'implement' && plannerGateOpen(state, options)) {
+    const items = state.plan?.items.length ?? 0
+    return {
+      ok: false,
+      reason:
+        `the task list has ${items} items, which is complex enough to plan with the planner worker: `
+        + 'call delegate_plan in the plan stage (pro model) first, then write the task list from its sub-tasks. '
+        + 'A dispatch that fails still opens this gate, so fix the route and retry once. '
+        + 'A small single-file change needs three items or fewer and skips this gate.',
     }
   }
   // In codex mode verification follows an applied edit; in review mode the
@@ -533,8 +574,8 @@ function remedy(stage: CodingStage, kind: string, mode: CodingMode): string {
   if (kind === 'verify') {
     return 'Verification runs in the verify stage: advance with coding_stage, then call run_verification.'
   }
-  if (kind === 'exec' && (stage === 'implement' || stage === 'verify' || stage === 'deliver')) {
-    return 'The lead agent does not run commands in this stage; verification commands belong to run_verification or delegate_verify.'
+  if (kind === 'exec' && stage === 'deliver') {
+    return 'Delivery reports the run; it does not execute commands. Run checks in the verify stage with run_verification.'
   }
   if (kind === 'read' && mode === 'consult') {
     return 'Consult mode answers from inspection only; keep reading, or advance to deliver.'
@@ -594,6 +635,7 @@ export function statusLine(state: CodingState): string {
   const handoff = `handoff goal=${goalRecorded(state) ? 'set' : 'missing'}, `
     + `acceptance=${state.handoff?.acceptance.length ?? 0}`
   const worker = state.worker === undefined ? undefined : `${state.worker.role}-worker ${state.worker.status}`
+  const planner = state.planner === undefined ? undefined : `planner ${state.planner.outcome}`
   return [
     `stage ${state.stage} of ${stagePath(state.mode)}; mode ${state.mode}`,
     `plan ${plan}`,
@@ -603,6 +645,7 @@ export function statusLine(state: CodingState): string {
     ...state.stage === 'deliver' && state.deliveryBlocked ? ['delivery BLOCKED'] : [],
     ...state.failure === undefined ? [] : [`failure ${state.failure.point}`],
     ...worker === undefined ? [] : [worker],
+    ...planner === undefined ? [] : [planner],
   ].join(' | ')
 }
 
@@ -626,6 +669,7 @@ export function checkpointOf(state: CodingState): CodingCheckpoint {
     verifyAttempts: state.verificationAttempts,
     ...state.verifyBlocked === undefined ? {} : { verifyBlocked: state.verifyBlocked },
     ...state.worker === undefined ? {} : { worker: state.worker },
+    ...state.planner === undefined ? {} : { planner: state.planner },
     ...state.refusal === undefined ? {} : { refusal: state.refusal },
     ...state.failure === undefined ? {} : { failure: state.failure },
     updatedAt: state.updatedAt,

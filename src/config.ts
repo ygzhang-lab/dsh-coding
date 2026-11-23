@@ -23,6 +23,11 @@ export const REASONING_MODES = ['auto', 'low', 'high', 'max'] as const
 /** One reasoning-level policy: auto classifies, the others pin. */
 export type ReasoningMode = typeof REASONING_MODES[number]
 
+/** planner 门禁策略：`complex` 对复杂 codex 任务强制 planner，`off` 关闭该门禁。 */
+export const PLANNER_GATE_MODES = ['complex', 'off'] as const
+/** 一条 planner 门禁策略。 */
+export type PlannerGateMode = typeof PLANNER_GATE_MODES[number]
+
 /** One resolved `provider/model` route for a worker subagent. */
 export interface WorkerRoute {
   readonly provider: string
@@ -46,6 +51,11 @@ export interface CodingConfig {
    * `provider/model` route for the planner worker (pro model). Required.
    */
   readonly plannerWorkerModel: string
+  /**
+   * planner 门禁：`complex` 时 codex 任务单超过三条且未派发过 `delegate_plan`
+   * 就不能进入 implement；`off` 关闭该门禁。
+   */
+  readonly requirePlanner: PlannerGateMode
   /**
    * Conversation language: `auto` follows the DSH interface, then the host
    * locale; `zh` / `en` pin it. The prompt fixes replies, todo items, and
@@ -99,6 +109,8 @@ export const Config: z<Config> = z.object({
   implementWorkerModel: z.string().required().volatile(),
   verifyWorkerModel: z.string().required().volatile(),
   plannerWorkerModel: z.string().required().volatile(),
+  // planner 门禁：不可在插件页修改，改动写入 bundle 的 patch config。
+  requirePlanner: z.union(PLANNER_GATE_MODES as unknown as PlannerGateMode[]).default('complex'),
   // Volatile: the plugin page switches the conversation language in place, and
   // the prompt reads the live value at assembly time.
   language: z.union(LANGUAGE_MODES as unknown as LanguageMode[]).default('auto').volatile(),
@@ -144,6 +156,12 @@ export const configJsonSchema = {
       type: 'string',
       pattern: '^[^/\\s]+/[^/\\s]+$',
       description: 'provider/model route for the planner worker (pro model); never inherited from the lead.',
+    },
+    requirePlanner: {
+      type: 'string',
+      enum: [...PLANNER_GATE_MODES],
+      default: 'complex',
+      description: 'Require the planner worker for a complex codex run; complex or off.',
     },
     language: {
       type: 'string',
@@ -243,6 +261,7 @@ export function normalizeConfig(raw: Partial<CodingConfig> | undefined): CodingC
   const implementWorkerModel = volatileValue(raw?.implementWorkerModel)
   const verifyWorkerModel = volatileValue(raw?.verifyWorkerModel)
   const plannerWorkerModel = volatileValue(raw?.plannerWorkerModel)
+  const requirePlanner = volatileValue(raw?.requirePlanner)
   const language = volatileValue(raw?.language)
   const reasoning = volatileValue(raw?.reasoning)
   // Parse eagerly so a malformed route fails activation, not the first dispatch.
@@ -254,6 +273,9 @@ export function normalizeConfig(raw: Partial<CodingConfig> | undefined): CodingC
     implementWorkerModel: String(implementWorkerModel).trim(),
     verifyWorkerModel: String(verifyWorkerModel).trim(),
     plannerWorkerModel: String(plannerWorkerModel).trim(),
+    requirePlanner: (PLANNER_GATE_MODES as readonly string[]).includes(requirePlanner as string)
+      ? requirePlanner as PlannerGateMode
+      : 'complex',
     language: normalizeLanguageMode(language),
     reasoning: (REASONING_MODES as readonly string[]).includes(reasoning as string)
       ? reasoning as ReasoningMode

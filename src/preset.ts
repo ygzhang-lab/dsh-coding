@@ -20,6 +20,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { type CodingConfig, type ReasoningMode } from './config.js'
 import { ReasoningController } from './reasoning.js'
 import { reasoningProjection } from './reasoning-projection.js'
+import { writeMemoryDocument } from './memory.js'
 import { controlMessage, stageMessage } from './messages.js'
 import { failureNotice, makeFailure, type FailurePoint } from './failures.js'
 import {
@@ -41,7 +42,9 @@ import {
   CODING_MODES,
   CODING_STAGES,
   TOOL,
+  WORKER_PRESETS,
   asCheckpoint,
+  needsWorkspaceInstructions,
   stagePath,
   toolClass,
   type CodingMode,
@@ -280,6 +283,7 @@ function implementPrompt(task: string, files: readonly string[], acceptance: str
   return [
     'You are the implement worker of the DSH Coding runtime. You have a fresh context: this task is complete on its own.',
     'Rules:',
+    '- The repository instructions (AGENTS.md) are already injected into this session: follow them; do not read the file again.',
     '- Read a file before editing it. Prefer apply_patch for multi-file or multi-hunk changes; use edit for one literal replacement and write for a new file.',
     '- Change only what the task needs: no drive-by refactor, no unrelated reformatting, no new dependency.',
     '- `acceptance` is the standard this change is measured against: satisfy it. Do not edit files outside the handoff.',
@@ -296,10 +300,13 @@ function implementPrompt(task: string, files: readonly string[], acceptance: str
 }
 
 /** Verify-worker prompt: read-only investigation of one check. */
-function verifyPrompt(task: string, state: CodingState): string {
+function verifyPrompt(task: string, state: CodingState, withInstructions = false): string {
   return [
     'You are the verify worker of the DSH Coding runtime. You cannot edit files; you run checks and report evidence.',
     'Rules:',
+    ...withInstructions
+      ? ['- The repository instructions (AGENTS.md) are already injected into this session: follow them; do not read the file again.']
+      : [],
     '- Use run_verification to execute a check; inspect the failing output it returns.',
     '- Report findings with file:line and a reproducible scenario, ordered by impact.',
     '- Report the command you actually ran, and put every conclusion about the acceptance criteria into findings.',
@@ -342,6 +349,28 @@ function plannerPrompt(task: string, state: CodingState): string {
 export async function apply(ctx: any): Promise<void> {
   const settings = ctx.dshCodingRuntime as { options: CodingConfig }
   const config = (): CodingConfig => settings.options
+
+  /**
+   * 主 Agent 自身是否就是配置的 planner 路由：这时 planner worker 是多余的，
+   * 门禁直接放行。读不到模型选择时按“不是”处理，门禁照常生效。
+   */
+  const leadIsPlanner = (agent: any): boolean => {
+    try {
+      const current = agent?.model?.current?.()
+      if (typeof current?.provider !== 'string' || typeof current?.model !== 'string') return false
+      const route = resolveWorkerRoute(config(), 'plan')
+      return current.provider === route.provider && current.model === route.model
+    } catch {
+      return false
+    }
+  }
+
+  /** 门禁需要的运行时事实：主 Agent 的路由，以及 `requirePlanner` 开关。 */
+  const advanceOptions = (agent: any) => ({
+    leadIsPlanner: leadIsPlanner(agent),
+    plannerGate: config().requirePlanner !== 'off',
+  })
+
   const store = new CodingStateStore(config)
 
   /** Current conversation language, used for the user-facing failure notice. */
@@ -752,7 +781,7 @@ export async function apply(ctx: any): Promise<void> {
           checkpoint: checkpointOf(state),
         }
       }
-      const check = checkAdvance(state, args.stage)
+      const check = checkAdvance(state, args.stage, advanceOptions(exec.agent))
       if (!check.ok) {
         const reason = check.reason ?? 'the stage gate refused this move'
         // Auto's workflow choice is a decision, not a skipped gate: report it
@@ -927,6 +956,8 @@ export async function apply(ctx: any): Promise<void> {
       'decisions and the acceptance checks. Any stage may add findings and open questions as evidence.',
       '`goal` replaces the recorded goal; every list field appends (de-duplicated, capped by the plugin).',
       'Record only what this stage adds or corrects; there is no need to repeat the whole history.',
+      'In deliver write the delivery record back first (`delivered` / `followUps`): the next turn and a',
+      'resumed session read that record, not this turn\'s message.',
     ].join(' '),
     parameters: {
       goal: {
@@ -958,6 +989,16 @@ export async function apply(ctx: any): Promise<void> {
         items: { type: 'string' as const },
         description: 'Questions still unanswered; appended.',
       },
+      delivered: {
+        type: 'string' as const,
+        description: '一条紧凑的交付记录：交付了什么、改了哪些文件、跑了哪个检查；覆盖已记录的交付。'
+          + '在 deliver 阶段写入，下一轮对话与重开会话都读它。',
+      },
+      followUps: {
+        type: 'array' as const,
+        items: { type: 'string' as const },
+        description: '残余风险或后续跟进项；追加。',
+      },
       reset: {
         type: 'boolean' as const,
         description: 'Reset the verification retry budget; the handoff itself is kept.',
@@ -987,6 +1028,8 @@ export async function apply(ctx: any): Promise<void> {
       findings?: string[]
       decisions?: string[]
       open?: string[]
+      delivered?: string
+      followUps?: string[]
       reset?: boolean
     }, exec: any): Promise<any> {
       if (exec.agent === undefined) throw new Error('coding_handoff requires an owning agent session')
@@ -1004,6 +1047,8 @@ export async function apply(ctx: any): Promise<void> {
       const findings = list(args?.findings)
       const decisions = list(args?.decisions)
       const open = list(args?.open)
+      const delivered = typeof args?.delivered === 'string' ? args.delivered : undefined
+      const followUps = list(args?.followUps)
       const patch: HandoffPatch = {
         ...goal === undefined ? {} : { goal },
         ...constraints === undefined ? {} : { constraints },
@@ -1011,6 +1056,8 @@ export async function apply(ctx: any): Promise<void> {
         ...findings === undefined ? {} : { findings },
         ...decisions === undefined ? {} : { decisions },
         ...open === undefined ? {} : { open },
+        ...delivered === undefined ? {} : { delivered },
+        ...followUps === undefined ? {} : { followUps },
       }
       if (Object.keys(patch).length > 0) {
         try {
@@ -1071,6 +1118,9 @@ export async function apply(ctx: any): Promise<void> {
     // still in flight, or both calls pass the guard and race for the result.
     state.worker = { role, status: 'running', startedAt }
     state.updatedAt = startedAt
+    // planner 尝试一进入就记为失败：worker 路由不可用时门禁仍然打开，避免一次
+    // 失败的派发锁死整个 codex 流程；派发结束再按实际结果改写。
+    if (role === 'plan') state.planner = { route: route.text, outcome: 'failed', at: startedAt }
     try {
       await assertWorkerModel(ctx, route, exec.signal)
     } catch (error) {
@@ -1082,18 +1132,23 @@ export async function apply(ctx: any): Promise<void> {
         `${text} Fix the route and call delegate_${role} again; retrying the same route will fail identically.`,
       )
     }
+    // verify 只有在 codex 且任务复杂时才值得付出整份 AGENTS.md 的上下文：
+    // 多子任务意味着跨任务依赖，改动面大意味着需要仓库规则。
+    const taskCount = Math.max(state.handoff?.tasks.length ?? 0, state.plan?.items.length ?? 0)
+    const withInstructions = role === 'verify'
+      && needsWorkspaceInstructions({ mode: state.mode, taskCount, changedFiles: state.files.size })
     let started: any
     try {
       started = await ctx.subagents.startActivation({
         provider: 'spawn',
-        agentPreset: workerPreset(role),
+        agentPreset: withInstructions ? WORKER_PRESETS.verifyWithInstructions : workerPreset(role),
         name: workerName,
         label: workerLabel(role, task),
         prompt: [{
           type: 'text',
           text: role === 'plan'
             ? plannerPrompt(task, state)
-            : role === 'implement' ? implementPrompt(task, files, args.acceptance, state) : verifyPrompt(task, state),
+            : role === 'implement' ? implementPrompt(task, files, args.acceptance, state) : verifyPrompt(task, state, withInstructions),
         }],
         parent: exec.agent,
         signal: exec.signal,
@@ -1131,6 +1186,9 @@ export async function apply(ctx: any): Promise<void> {
         : { summary: report.summary, ...report.files.length === 0 ? {} : { files: report.files } },
     }
     state.updatedAt = Date.now()
+    if (role === 'plan') {
+      state.planner = { route: route.text, outcome: ok ? 'completed' : 'failed', at: state.updatedAt }
+    }
     // The dispatch is the failure point either way: a worker that ran but did
     // not complete is the same interruption, and a completed one clears it.
     if (ok) clearFailure(state, 'delegate')
@@ -1414,7 +1472,7 @@ export async function apply(ctx: any): Promise<void> {
   // ── Control channel for the UI and the user ──────────────────────────────
   // The body is extracted so an exception becomes a reported failure with a
   // next move: `/coding` is the operator's own recovery path.
-  const handleCodingCommand = ({ agent, rawInput }: { agent: any; rawInput?: string }) => {
+  const handleCodingCommand = async ({ agent, rawInput, signal }: { agent: any; rawInput?: string; signal?: AbortSignal }) => {
     const state = stateOf(agent)
     if (state === undefined) {
       return { kind: 'error' as const, text: 'this session is not running the dsh-coding preset' }
@@ -1429,12 +1487,21 @@ export async function apply(ctx: any): Promise<void> {
       resetVerification(state)
       return { kind: 'success' as const, text: `verification retry budget reset; ${statusLine(state)}` }
     }
+    if (text === 'memory') {
+      // 交接文档由 Host 写盘：浏览器半只发这一行命令，不直接写文件。
+      const written = await writeMemoryDocument(ctx, agent, state, { signal })
+      if (!written.ok) return { kind: 'error' as const, text: `${written.reason} — ${written.action}` }
+      return {
+        kind: 'success' as const,
+        text: `handoff document written: ${written.displayPath} (session ${state.sessionId})`,
+      }
+    }
     if (text.startsWith('stage')) {
       const target = text.slice('stage'.length).trim() as CodingStage
       if (!(CODING_STAGES as readonly string[]).includes(target)) {
         return { kind: 'error' as const, text: `unknown stage "${target}"; use ${CODING_STAGES.join(', ')}` }
       }
-      const check = checkAdvance(state, target)
+      const check = checkAdvance(state, target, advanceOptions(agent))
       if (!check.ok) {
         // A user-issued move reports the gate but never arms the
         // step-blocking refusal meant for a model that tried to skip it.
@@ -1485,11 +1552,11 @@ export async function apply(ctx: any): Promise<void> {
   ctx.inject(['commands'], (child: any) => {
     child.commands.register({
       name: 'coding',
-      description: 'Show or set this session\'s Coding mode or stage: /coding <auto|consult|review|codex>, /coding set <mode> (silent, no Turn), or /coding stage <name>.',
-      input: { hint: 'auto | consult | review | codex | set <auto|consult|review|codex> | stage <requirements|plan|implement|verify|deliver> | reset' },
-      handler: (payload: { agent: any; rawInput?: string }) => {
+      description: 'Show or set this session\'s Coding mode or stage: /coding <auto|consult|review|codex>, /coding set <mode> (silent, no Turn), or /coding stage <name>. /coding memory writes a handoff document for this turn under .agents/memory at the project root.',
+      input: { hint: 'auto | consult | review | codex | set <auto|consult|review|codex> | stage <requirements|plan|implement|verify|deliver> | reset | memory' },
+      handler: async (payload: { agent: any; rawInput?: string; signal?: AbortSignal }) => {
         try {
-          return handleCodingCommand(payload)
+          return await handleCodingCommand(payload)
         } catch (error) {
           const state = stateOf(payload.agent)
           if (state !== undefined) fail(state, 'command', error)

@@ -51,23 +51,32 @@ export const STAGE_CONTRACT: Readonly<Record<CodingStage, string>> = {
   ].join('\n'),
   plan: [
     '### plan — define done',
+    '- A `Delivered` section in the handoff means this is a follow-up round: start from that record and its '
+      + 'follow-ups; do not re-derive or redo the earlier change.',
     '- Record what requirements established in the handoff: what the user asked for (goal, deliverable, '
       + 'constraints) and what the project actually looks like (entry points, patterns, checks). If either is '
       + 'missing, inspect now instead of guessing; a fact that stays in the conversation never reaches a worker.',
-    '- Call `delegate_plan` when the work is more than a one-file edit: it explores read-only and returns '
-      + 'single-purpose sub-tasks. For each task settle the boundary and handoff first: goal, files in scope, '
-      + 'acceptance check, and what it must not touch. Order tasks so each depends only on earlier ones.',
+    '- Call `delegate_plan` for every multi-file or cross-module change in codex: it explores read-only and '
+      + 'returns single-purpose sub-tasks. A task list that would exceed three items makes it mandatory — the '
+      + 'runtime refuses `implement` until a `delegate_plan` dispatch is recorded (a dispatch that fails counts '
+      + 'too), and skips that gate when the lead itself runs the planner route. For each task settle the '
+      + 'boundary and handoff first: goal, files in scope, acceptance check, and what it must not touch. Order '
+      + 'tasks so each depends only on earlier ones.',
     '- Every todo item and every planner task must name an observable acceptance check; record the definition '
       + 'of done with `coding_handoff({ acceptance: [...] })`. codex cannot enter verify without it.',
-    '- Call `todo_write` with one verifiable item per task (3-6) and exactly one `in_progress`. Keep each '
-      + 'implement brief self-contained so the worker\'s context and tokens stay bounded.',
+    '- Call `todo_write` with one verifiable item per task (1-3 for a small single-file change, 4-6 for a '
+      + 'multi-file one) and exactly one `in_progress`. Keep each implement brief self-contained so the '
+      + 'worker\'s context and tokens stay bounded.',
     '- Choose the smallest approach: reuse existing functions, types, and patterns. Add no abstraction, '
       + 'dependency, or drive-by refactor the task does not need.',
-    '- `coding_stage` refuses `implement` until the list is written.',
+    '- `coding_stage` refuses `implement` until the list is written, and a list over three items also needs a '
+      + '`delegate_plan` dispatch first.',
   ].join('\n'),
   implement: [
     '### implement — delegate the edit',
     '- You cannot edit files in this stage: `apply_patch`, `edit`, and `write` are not in your tool table.',
+    '- You do run shell commands yourself (`bash` on POSIX, `pwsh` on Windows) for installs, git, and '
+      + 'one-off inspection the worker cannot do; editing files is still the worker\'s job.',
     '- Call `delegate_implement` with a self-contained task: goal, acceptance criteria, exact files, and '
       + 'the excerpts the worker needs. The worker has a fresh context and only the editing tools.',
     '- Pass the handoff\'s goal, constraints, and the current task\'s acceptance into the brief; do not make '
@@ -80,6 +89,8 @@ export const STAGE_CONTRACT: Readonly<Record<CodingStage, string>> = {
     '### verify — prove it',
     '- Run the narrowest check first: `run_verification` with `scope:"targeted"`, then `package`, then '
       + '`full` when the change reaches across packages.',
+    '- Ad-hoc shell commands are available here for reproducing a failure; project checks still go through '
+      + '`run_verification` so the outcome is recorded as evidence.',
     '- A behavior change needs a test that would have failed before it. `delegate_verify` investigates a '
       + 'failure without editing.',
     '- A task without an acceptance check cannot enter verify; record it with `coding_handoff` first.',
@@ -94,6 +105,9 @@ export const STAGE_CONTRACT: Readonly<Record<CodingStage, string>> = {
     '### deliver — report compactly',
     '- Close the task list first: mark the finished items completed with `todo_write`, so no step stays '
       + 'in_progress after delivery.',
+    '- Record the delivery in the handoff before you finish: `coding_handoff({ delivered, followUps })` — one '
+      + 'line naming what changed, the files touched, and the check that proved it. The next turn and a '
+      + 'resumed session read this record, not this conversation.',
     '- Lead with the outcome: what changed and why. Then the files touched as backticked paths, the '
       + 'verification evidence (command and result), and residual risk.',
     '- If the last check failed and the retry budget is exhausted, this is a BLOCKED delivery: state the '

@@ -125,13 +125,14 @@ const STAGE_CLASSES: Readonly<Record<CodingStage, readonly ToolClass[]>> = {
   requirements: ['read', 'exec', 'stage', 'mode', 'reasoning'],
   // Planning may inspect and must author the structured task list.
   plan: ['read', 'exec', 'plan', 'delegate', 'stage', 'mode', 'reasoning'],
-  // Implementation is delegated: the lead keeps only the task list and the verbs.
-  implement: ['delegate', 'plan', 'stage', 'mode', 'reasoning'],
-  // Verification is read + a structured check; delegation stays available, and
-  // the task list must be closable so a finished check does not stay running.
-  verify: ['read', 'verify', 'plan', 'stage', 'mode', 'reasoning'],
-  // Delivery reports and closes the task list; nothing may mutate source or
-  // start a fresh verification.
+  // Implementation is delegated: the lead keeps the task list, the shell it needs
+  // for installs and one-off commands, and the verbs. Editing stays the worker's.
+  implement: ['delegate', 'plan', 'exec', 'stage', 'mode', 'reasoning'],
+  // Verification is read + a structured check, plus ad-hoc commands to reproduce a
+  // failure; delegation stays available and the task list must be closable.
+  verify: ['read', 'verify', 'exec', 'plan', 'stage', 'mode', 'reasoning'],
+  // Delivery reports and closes the task list; nothing may mutate source, run a
+  // command, or start a fresh verification.
   deliver: ['read', 'plan', 'stage', 'mode', 'reasoning'],
 }
 
@@ -149,11 +150,16 @@ export function stageAdmissions(stage: CodingStage): string {
  * The lead's tool table during `implement`: exactly these names remain visible.
  * Naming the allow-list (rather than denying individual tools) is what makes the
  * trim total, including tools a later plugin registers.
+ * `bash` and `pwsh` are both listed because only one exists per platform;
+ * `syncTable` drops the absent one, since `tools.restrict` rejects names the
+ * scope does not register.
  */
 export const IMPLEMENT_TABLE: readonly string[] = [
   TOOL.implement,
   TOOL.handoff,
   'todo_write',
+  'bash',
+  'pwsh',
   TOOL.stage,
   TOOL.mode,
   TOOL.reasoning,
@@ -164,7 +170,30 @@ export const WORKER_PRESETS = {
   planner: 'dsh-coding-planner',
   implement: 'dsh-coding-implement',
   verify: 'dsh-coding-verify',
+  verifyWithInstructions: 'dsh-coding-verify-instructions',
 } as const
+
+/** 触发 verify 注入仓库指令的最小子任务数：多个子任务意味着跨任务依赖。 */
+export const VERIFY_INSTRUCTION_TASK_THRESHOLD = 2
+/** 触发 verify 注入仓库指令的最小改动文件数：改动面大时需要仓库规则。 */
+export const VERIFY_INSTRUCTION_FILE_THRESHOLD = 3
+
+/** 决定 verify worker 是否加载仓库指令的输入。 */
+export interface WorkspaceInstructionDemand {
+  readonly mode: CodingMode
+  readonly taskCount: number
+  readonly changedFiles: number
+}
+
+/**
+ * verify 是否应加载仓库指令：仅 codex 模式，且（多子任务）或（改动文件多）。
+ * 单任务单文件的核查不注入，避免为一次检查付出整份 AGENTS.md 的上下文。
+ */
+export function needsWorkspaceInstructions(demand: WorkspaceInstructionDemand): boolean {
+  if (demand.mode !== 'codex') return false
+  return demand.taskCount >= VERIFY_INSTRUCTION_TASK_THRESHOLD
+    || demand.changedFiles >= VERIFY_INSTRUCTION_FILE_THRESHOLD
+}
 
 /** The stable route identity a session's coding run is checkpointed under. */
 export const CHECKPOINT_VERSION = 1
@@ -203,6 +232,15 @@ export interface WorkerRecord {
   readonly finishedAt?: number
 }
 
+/** 一次 planner 派发尝试：失败也算尝试，避免 worker 路由不可用时把 codex 流程锁死。 */
+export interface PlannerAttempt {
+  /** 本次尝试使用的配置路由 `provider/model`。 */
+  readonly route: string
+  /** 只有 worker 完成并回报 ok 才是 `completed`；失败的尝试同样打开门禁。 */
+  readonly outcome: 'completed' | 'failed'
+  readonly at: number
+}
+
 /**
  * Whole-value checkpoint emitted with every Coding tool result. The Web
  * projection stores exactly this shape, so a history page that starts in the
@@ -234,6 +272,8 @@ export interface CodingCheckpoint {
   /** Set once the retry budget is exhausted: the run must deliver blocked, not retry. */
   readonly verifyBlocked?: { readonly attempts: number; readonly reason: string; readonly at: number }
   readonly worker?: WorkerRecord
+  /** planner 派发尝试；旧 checkpoint 没有该字段，读取时视为“未尝试”。 */
+  readonly planner?: PlannerAttempt
   readonly refusal?: { readonly target: CodingStage; readonly reason: string; readonly at: number }
   /** The most recent blocking exception; absent on checkpoints written before it existed. */
   readonly failure?: CodingFailure
@@ -279,6 +319,9 @@ export function asCheckpoint(value: unknown): CodingCheckpoint | undefined {
   const blockedValue = v['verifyBlocked']
   const verifyBlocked = asVerifyBlocked(blockedValue)
   if (blockedValue !== undefined && verifyBlocked === undefined) return undefined
+  const plannerValue = v['planner']
+  const planner = asPlanner(plannerValue)
+  if (plannerValue !== undefined && planner === undefined) return undefined
   return {
     v: CHECKPOINT_VERSION,
     runId: v['runId'],
@@ -296,6 +339,7 @@ export function asCheckpoint(value: unknown): CodingCheckpoint | undefined {
     ...verifyAttempts === undefined ? {} : { verifyAttempts },
     ...verifyBlocked === undefined ? {} : { verifyBlocked },
     ...worker === undefined ? {} : { worker },
+    ...planner === undefined ? {} : { planner },
     ...refusal === undefined ? {} : { refusal },
     ...failure === undefined ? {} : { failure },
     updatedAt: v['updatedAt'],
@@ -369,6 +413,15 @@ function asWorker(value: unknown): WorkerRecord | undefined {
     startedAt: v['startedAt'],
     ...isFiniteNumber(v['finishedAt']) ? { finishedAt: v['finishedAt'] } : {},
   }
+}
+
+function asPlanner(value: unknown): PlannerAttempt | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const v = value as Record<string, unknown>
+  if (typeof v['route'] !== 'string' || v['route'] === '') return undefined
+  if (v['outcome'] !== 'completed' && v['outcome'] !== 'failed') return undefined
+  if (!isFiniteNumber(v['at'])) return undefined
+  return { route: v['route'], outcome: v['outcome'], at: v['at'] }
 }
 
 function asRefusal(value: unknown): { target: CodingStage; reason: string; at: number } | undefined {

@@ -10,6 +10,11 @@
  * than the timestamp default. The Host runtime, the worker presets, and the Web
  * client can therefore import it directly.
  *
+ * 交付段的写入约定：`delivered` / `followUps` 只由 deliver 阶段经 coding_handoff 写入，
+ * 记录本轮交付了什么与对应证据；它们随 checkpoint 的 handoff 持久化，由下一轮的 plan /
+ * implement worker 读取（verify 分片不渲染该段以控制提示词体积），因此重开会话也能直接
+ * 看到上一轮的交付结果，而不必回头翻对话正文。
+ *
  * @module dsh-coding/handoff
  */
 
@@ -49,6 +54,8 @@ export interface CodingHandoff {
   readonly version: typeof HANDOFF_VERSION
   /** What the run is for; cleared by patching it with an empty string. */
   readonly goal?: string
+  /** 一条紧凑的交付记录（本轮交付了什么 + 证据）；空串表示清除，由模型在 deliver 阶段写入。 */
+  readonly delivered?: string
   readonly constraints: readonly string[]
   /** Acceptance criteria: the definition of done `verify` and `deliver` check. */
   readonly acceptance: readonly string[]
@@ -56,6 +63,8 @@ export interface CodingHandoff {
   readonly decisions: readonly string[]
   /** Questions still open; the next stage answers or escalates them. */
   readonly open: readonly string[]
+  /** 残余风险与后续跟进项，下一轮的 plan / implement worker 会读到。 */
+  readonly followUps: readonly string[]
   readonly tasks: readonly HandoffTask[]
   readonly changes: readonly HandoffChange[]
   readonly updatedAt: number
@@ -64,11 +73,15 @@ export interface CodingHandoff {
 /** A partial update applied by {@link mergeHandoff}; absent fields are untouched. */
 export interface HandoffPatch {
   readonly goal?: string
+  /** 覆盖交付记录；传空串表示清除，不传则保留上一条。 */
+  readonly delivered?: string
   readonly constraints?: readonly string[]
   readonly acceptance?: readonly string[]
   readonly findings?: readonly string[]
   readonly decisions?: readonly string[]
   readonly open?: readonly string[]
+  /** 追加残余风险 / 跟进项（去重后保留下限内的最新条目）。 */
+  readonly followUps?: readonly string[]
   /** Replaces the task list wholesale when present. */
   readonly tasks?: readonly HandoffTask[]
   /** Merged by `file` when present, so a later stage refines a summary. */
@@ -79,16 +92,30 @@ export interface HandoffPatch {
 type HandoffRole = 'plan' | 'implement' | 'verify'
 
 /** One renderable section of a handoff. */
-type HandoffSection = 'goal' | 'constraints' | 'done' | 'decisions' | 'findings' | 'open' | 'tasks' | 'changes'
+type HandoffSection =
+  | 'goal'
+  | 'delivered'
+  | 'constraints'
+  | 'done'
+  | 'decisions'
+  | 'findings'
+  | 'open'
+  | 'followUps'
+  | 'tasks'
+  | 'changes'
 
 /**
  * Sections each role receives, in order. The planner needs the problem, the
  * implementer needs the decisions and the task list, and the verifier needs the
  * definition of done plus what already changed.
+ *
+ * 交付段只给 plan / implement：这两个角色需要知道上一轮交付了什么，才能接着规划与实现。
+ * verify 只核对本次改动（goal / done / changes / decisions / findings），不读上一轮交付
+ * 记录，以控制提示词体积。
  */
 const WORKER_SECTIONS: Readonly<Record<HandoffRole, readonly HandoffSection[]>> = {
-  plan: ['goal', 'constraints', 'done', 'findings', 'open'],
-  implement: ['goal', 'constraints', 'done', 'decisions', 'findings', 'tasks', 'open'],
+  plan: ['goal', 'delivered', 'constraints', 'done', 'findings', 'open'],
+  implement: ['goal', 'delivered', 'constraints', 'done', 'decisions', 'findings', 'tasks', 'open'],
   verify: ['goal', 'done', 'changes', 'decisions', 'findings'],
 }
 
@@ -101,6 +128,7 @@ export function emptyHandoff(at?: number): CodingHandoff {
     findings: [],
     decisions: [],
     open: [],
+    followUps: [],
     tasks: [],
     changes: [],
     updatedAt: at ?? Date.now(),
@@ -111,6 +139,9 @@ export function emptyHandoff(at?: number): CodingHandoff {
  * Merge one patch into a handoff. A list patch appends (dropping exact
  * duplicates, keeping the newest {@link HANDOFF_ITEMS_LIMIT} entries); a task
  * patch replaces the list; a change patch refines entries by `file`.
+ *
+ * `delivered` 与 goal 同语义：给值即覆盖，空串清除；`followUps` 与其余列表字段
+ * 同语义：追加、去重，并保留最新的 {@link HANDOFF_ITEMS_LIMIT} 条。
  * @param base - the record being updated, or undefined to start empty.
  * @param patch - the sections this stage contributes.
  * @param at - timestamp to stamp, defaults to now.
@@ -119,14 +150,18 @@ export function emptyHandoff(at?: number): CodingHandoff {
 export function mergeHandoff(base: CodingHandoff | undefined, patch: HandoffPatch, at?: number): CodingHandoff {
   const previous = base ?? emptyHandoff(at)
   const goal = boundedText(patch.goal === undefined ? previous.goal : patch.goal, HANDOFF_TEXT_LIMIT)
+  const delivered = boundedText(patch.delivered === undefined ? previous.delivered : patch.delivered, HANDOFF_TEXT_LIMIT)
   return {
     version: HANDOFF_VERSION,
     ...goal === '' ? {} : { goal },
+    ...delivered === '' ? {} : { delivered },
     constraints: mergeItems(previous.constraints, listOf(patch.constraints)),
     acceptance: mergeItems(previous.acceptance, listOf(patch.acceptance)),
     findings: mergeItems(previous.findings, listOf(patch.findings)),
     decisions: mergeItems(previous.decisions, listOf(patch.decisions)),
     open: mergeItems(previous.open, listOf(patch.open)),
+    // 旧数据与测试手工构造的记录可能没有 followUps，先兜底成空列表再合并。
+    followUps: mergeItems(previous.followUps ?? [], listOf(patch.followUps)),
     tasks: patch.tasks === undefined ? cleanTasks(previous.tasks) : boundedTasks(listOf(patch.tasks)),
     changes: patch.changes === undefined ? cleanChanges(previous.changes) : mergeChanges(previous.changes, listOf(patch.changes)),
     updatedAt: at ?? Date.now(),
@@ -137,6 +172,9 @@ export function mergeHandoff(base: CodingHandoff | undefined, patch: HandoffPatc
  * Validate one untyped value as a {@link CodingHandoff}. The record is persisted
  * in checkpoints and restored from durable JSON, so every field is re-checked
  * here rather than trusted from the writer's build.
+ *
+ * 旧 checkpoint 可能没有 `delivered` / `followUps`（与 `files` 字段先例一致，不 bump
+ * {@link HANDOFF_VERSION}）：缺字段按空值处理，损坏值被丢弃，返回的记录始终可用。
  * @param value - decoded JSON or any other untyped value.
  * @returns the normalized record, or undefined when it is not version 1.
  */
@@ -145,15 +183,18 @@ export function asHandoff(value: unknown): CodingHandoff | undefined {
   const raw = value as Record<string, unknown>
   if (raw['version'] !== HANDOFF_VERSION) return undefined
   const goal = boundedText(raw['goal'], HANDOFF_TEXT_LIMIT)
+  const delivered = boundedText(raw['delivered'], HANDOFF_TEXT_LIMIT)
   const updatedAt = raw['updatedAt']
   return {
     version: HANDOFF_VERSION,
     ...goal === '' ? {} : { goal },
+    ...delivered === '' ? {} : { delivered },
     constraints: mergeItems([], listOf(raw['constraints'])),
     acceptance: mergeItems([], listOf(raw['acceptance'])),
     findings: mergeItems([], listOf(raw['findings'])),
     decisions: mergeItems([], listOf(raw['decisions'])),
     open: mergeItems([], listOf(raw['open'])),
+    followUps: mergeItems([], listOf(raw['followUps'])),
     tasks: boundedTasks(listOf(raw['tasks'])),
     changes: mergeChanges([], listOf(raw['changes'])),
     updatedAt: typeof updatedAt === 'number' && Number.isFinite(updatedAt) ? updatedAt : Date.now(),
@@ -172,11 +213,14 @@ export function handoffDigest(handoff: CodingHandoff | undefined, limit: number 
   const lines: string[] = []
   const goal = boundedText(handoff.goal, HANDOFF_TEXT_LIMIT)
   if (goal !== '') lines.push(`goal: ${goal}`)
+  const delivered = boundedText(handoff.delivered, HANDOFF_TEXT_LIMIT)
+  if (delivered !== '') lines.push(`delivered: ${delivered}`)
   pushItems(lines, 'constraints', handoff.constraints)
   pushItems(lines, 'done', handoff.acceptance)
   pushItems(lines, 'decisions', handoff.decisions)
   pushItems(lines, 'findings', handoff.findings)
   pushItems(lines, 'open', handoff.open)
+  pushItems(lines, 'follow-ups', handoff.followUps)
   const tasks = cleanTasks(handoff.tasks)
   if (tasks.length > 0) {
     lines.push('tasks:')
@@ -195,6 +239,7 @@ export function handoffDigest(handoff: CodingHandoff | undefined, limit: number 
 
 /**
  * Render the sections one worker role receives, as a prompt fragment.
+ * 只有 plan / implement 分片包含 `Delivered:` 段，见 {@link WORKER_SECTIONS}。
  * @param handoff - record to render, or undefined.
  * @param role - worker about to run.
  * @returns the fragment, or '' when nothing applies to this role.
@@ -203,11 +248,13 @@ export function handoffForWorker(handoff: CodingHandoff | undefined, role: Hando
   if (handoff === undefined) return ''
   const sections: Readonly<Record<HandoffSection, string | undefined>> = {
     goal: goalSection(handoff.goal),
+    delivered: deliveredSection(handoff.delivered),
     constraints: bulletSection('Constraints:', cleanItems(handoff.constraints)),
     done: bulletSection('Definition of done:', cleanItems(handoff.acceptance)),
     decisions: bulletSection('Decisions:', cleanItems(handoff.decisions)),
     findings: bulletSection('Findings:', cleanItems(handoff.findings)),
     open: bulletSection('Open questions:', cleanItems(handoff.open)),
+    followUps: bulletSection('Follow-ups:', cleanItems(handoff.followUps)),
     tasks: taskSection(cleanTasks(handoff.tasks)),
     changes: changeSection(cleanChanges(handoff.changes)),
   }
@@ -341,6 +388,12 @@ function pushItems(lines: string[], label: string, values: readonly unknown[]): 
 function goalSection(goal: string | undefined): string | undefined {
   const text = boundedText(goal, HANDOFF_TEXT_LIMIT)
   return text === '' ? undefined : `Goal:\n${text}`
+}
+
+/** The `Delivered:` fragment（上一轮交付了什么 + 证据），or nothing when absent. */
+function deliveredSection(value: string | undefined): string | undefined {
+  const text = boundedText(value, HANDOFF_TEXT_LIMIT)
+  return text === '' ? undefined : `Delivered:\n${text}`
 }
 
 /** A titled list, one `- item` per line, or nothing when the list is empty. */
