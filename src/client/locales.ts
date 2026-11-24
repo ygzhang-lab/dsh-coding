@@ -91,8 +91,9 @@ export type CodingKey =
   | 'config.modelsLoading'
   | 'config.modelsUnavailable'
   | 'config.modelsRetry'
-  | 'config.modelPlaceholder'
+  | 'config.modelAuto'
   | 'config.modelMissing'
+  | 'config.modelProbeFailed'
 
 /** English copy. */
 export const en: Record<CodingKey, string> = {
@@ -144,11 +145,11 @@ export const en: Record<CodingKey, string> = {
   'config.mode': 'Default mode',
   'config.modeHint': 'Mode a new Coding session starts in; auto chooses the workflow during the requirements stage.',
   'config.implementModel': 'Implement worker model',
-  'config.implementModelHint': 'Required provider/model route. Never inherited from the lead.',
+  'config.implementModelHint': 'Pick from the models this Host configures; automatic follows the lead\'s current model. Never inherited silently.',
   'config.plannerModel': 'Planner worker model',
-  'config.plannerModelHint': 'Required provider/model route for the pro planner; it plans, it never edits.',
+  'config.plannerModelHint': 'Pick from the models this Host configures. `auto` follows the lead, which also skips the planner gate; pick a pro route to force a separate planning pass.',
   'config.verifyModel': 'Verify worker model',
-  'config.verifyModelHint': 'Required provider/model route for the read-only verify worker.',
+  'config.verifyModelHint': 'Pick from the models this Host configures; automatic follows the lead\'s current model.',
   'config.language': 'Conversation language',
   'config.languageHint': 'Auto follows the DSH interface, then the host locale. Only Chinese and English ship.',
   'config.languageAuto': 'Automatic (follow DSH)',
@@ -163,18 +164,19 @@ export const en: Record<CodingKey, string> = {
   'config.saving': 'Saving…',
   'config.saved': 'Saved.',
   'config.saveFailed': 'The configuration was rejected. Check the values and Host authorization.',
-  'config.invalidRoute': 'Use provider/model, for example deepseek-account/deepseek-flash.',
+  'config.invalidRoute': 'Use `auto` or provider/model, for example deepseek-account/deepseek-flash.',
   'config.readOnly': 'This deployment stores settings read-only.',
   'config.loading': 'Loading configuration…',
   'config.unavailable': 'This Host does not expose the configuration form for this entry.',
   'config.reset': 'Restore defaults',
   'config.presetWarning': 'Keep every plugin of the Coding preset enabled, or this plugin cannot work.',
-  'config.modelWarning': 'Select the worker models carefully. An invalid choice is highlighted and disables Save.',
+  'config.modelWarning': 'The list comes from the models this Host configures; a route outside the catalog cannot be picked.',
   'config.modelsLoading': 'Loading models…',
   'config.modelsUnavailable': 'Could not load the configured model list:',
   'config.modelsRetry': 'Reload models',
-  'config.modelPlaceholder': 'Select a model',
+  'config.modelAuto': 'Automatic (follow the lead\'s current model)',
   'config.modelMissing': 'not in the current model list',
+  'config.modelProbeFailed': 'Providers with no discoverable models:',
 }
 
 /** Chinese copy. */
@@ -227,11 +229,11 @@ export const zh: Record<CodingKey, string> = {
   'config.mode': '默认模式',
   'config.modeHint': '新建 Coding 会话的初始模式；自动模式在需求分析阶段选择工作流。',
   'config.implementModel': '实现 worker 模型',
-  'config.implementModelHint': '必填 provider/model 路由，不会继承主代理模型。',
+  'config.implementModelHint': '从当前 DSH 已配置的模型里选择；「自动」跟随主代理当前模型。不会静默继承。',
   'config.plannerModel': '规划 worker 模型（pro）',
-  'config.plannerModelHint': 'pro 规划 worker 的必填 provider/model 路由；只做规划，不改文件。',
+  'config.plannerModelHint': '从当前 DSH 已配置的模型里选择；「自动」跟随主代理，planner 门禁随之跳过；想强制独立规划就选一条 pro 路由。',
   'config.verifyModel': '验证 worker 模型',
-  'config.verifyModelHint': '只读验证 worker 的必填 provider/model 路由。',
+  'config.verifyModelHint': '从当前 DSH 已配置的模型里选择；「自动」跟随主代理当前模型。',
   'config.language': '会话语言',
   'config.languageHint': '自动模式先跟随 DSH 界面语言，再跟随宿主环境语言；插件只带中文和英文。',
   'config.languageAuto': '自动（跟随 DSH）',
@@ -246,16 +248,17 @@ export const zh: Record<CodingKey, string> = {
   'config.saving': '保存中…',
   'config.saved': '已保存。',
   'config.saveFailed': '配置被拒绝，请检查取值与 Host 授权。',
-  'config.invalidRoute': '请填写 provider/model，例如 deepseek-account/deepseek-flash。',
+  'config.invalidRoute': '请选择「自动」或填写 provider/model，例如 deepseek-account/deepseek-flash。',
   'config.readOnly': '当前部署的设置是只读的。',
   'config.loading': '正在加载配置…',
   'config.unavailable': '当前 Host 未为此插件条目提供配置表单。',
   'config.reset': '恢复默认',
   'config.presetWarning': '请保持 Coding 预设全部开启状态，否则本插件无法工作。',
-  'config.modelWarning': '请正确勾选子任务智能体模型，如果填写错误或选择错误就用警告色进行提示（禁用保存按钮）。',
+  'config.modelWarning': '下拉选项来自当前 Host 已配置的模型；目录外的值无法选择。',
   'config.modelsLoading': '正在加载模型列表…',
   'config.modelsUnavailable': '无法加载已配置的模型列表：',
   'config.modelsRetry': '重新加载模型',
-  'config.modelPlaceholder': '请选择模型',
+  'config.modelAuto': '自动（跟随主代理当前模型）',
   'config.modelMissing': '不在当前模型列表',
+  'config.modelProbeFailed': '以下 provider 未能枚举出模型：',
 }

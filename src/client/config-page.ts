@@ -18,6 +18,7 @@
  */
 import { createElement as h, useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
+import { WORKER_AUTO, isWorkerAuto } from '../worker-auto.js'
 import type { CodingKey } from './locales.js'
 
 /** Settings namespace key: the bundle row id. */
@@ -66,13 +67,16 @@ export interface CodingConfigPageProps {
   readonly view: 'summary' | 'page'
   /** Host-owned form for this bundle entry. */
   readonly form: CodingConfigForm
-  /** Host LLM Remote the model selects read their catalog from. */
+  /** Host session Remote the model fields read their catalog from. */
   readonly remote?: ModelCatalogRemote
   readonly t: (key: CodingKey) => string
 }
 
-/** `provider/model`; the Host applies the same rule at activation. */
+/** `provider/model`; the Host applies the same rule (plus the `auto` sentinel) at activation. */
 const ROUTE = /^[^/\s]+\/[^/\s]+$/u
+
+/** 允许的取值：`auto`（派发时跟随主代理）或一条具体 `provider/model`。 */
+const isSelectableRoute = (value: string): boolean => isWorkerAuto(value) || ROUTE.test(value.trim())
 
 /** Read one string field from a settings value. */
 export function fieldOf(value: Record<string, unknown> | undefined, key: string, fallback = ''): string {
@@ -90,12 +94,16 @@ export interface Draft {
   readonly reasoning: string
 }
 
-/** The defaults the page restores, matching `cordis.patch.yml`. */
+/**
+ * The defaults the page restores, matching `cordis.patch.yml`.
+ *
+ * 三个 worker 默认跟随主代理当前模型；与 cordis.patch.yml 同步，用户可手动改成具体路由。
+ */
 export const DEFAULT_DRAFT: Draft = {
   defaultMode: 'auto',
-  plannerWorkerModel: 'deepseek-account/deepseek-v4-pro',
-  implementWorkerModel: 'deepseek-account/deepseek-flash',
-  verifyWorkerModel: 'deepseek-account/deepseek-flash',
+  plannerWorkerModel: WORKER_AUTO,
+  implementWorkerModel: WORKER_AUTO,
+  verifyWorkerModel: WORKER_AUTO,
   language: 'auto',
   reasoning: 'auto',
 }
@@ -106,16 +114,21 @@ export interface ModelOption {
   readonly provider: string
   readonly model: string
   readonly label: string
-  /** The stored route is no longer advertised; shown but not selectable. */
+  /** The stored route is no longer advertised; still listed and kept as typed. */
   readonly missing?: boolean
 }
 
-/** Built-in fallbacks for providers that register an adapter but no discovery. */
-const BUILTIN_MODELS: Readonly<Record<string, readonly { readonly id: string; readonly name: string }[]>> = {
-  'deepseek-account': [
-    { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-    { id: 'deepseek-flash', name: 'DeepSeek Flash' },
-  ],
+/** One provider's catalog result, for the page's diagnostic line. */
+export interface ProviderProbe {
+  readonly provider: string
+  /** Why the Host lookup failed, when it did. */
+  readonly error?: string
+}
+
+/** The enumerated catalog plus what happened to each provider. */
+export interface ModelCatalog {
+  readonly options: readonly ModelOption[]
+  readonly probes: readonly ProviderProbe[]
 }
 
 /** The result envelope every Host Remote method returns. */
@@ -125,20 +138,29 @@ export interface RemoteResultLike<T> {
   readonly error?: { readonly message?: string }
 }
 
-/**
- * The slice of `ctx.remote.llm` this page reads. Model discovery is three
- * calls: the registered providers, which of them the settings service can
- * describe, and the models each one advertises for its settings namespace.
- */
+/** One provider group of the Host session model catalog. */
+export interface ModelCatalogGroup {
+  readonly id: string
+  readonly name?: string
+  readonly models: readonly { readonly id: string; readonly name?: string }[]
+}
+
+/** One provider whose catalog lookup failed on the Host. */
+export interface ModelCatalogFailure {
+  readonly id: string
+  readonly name?: string
+  readonly message: string
+}
+
+/** The Host session model catalog the composer model picker renders. */
+export interface ModelCatalogValue {
+  readonly groups: readonly ModelCatalogGroup[]
+  readonly failures?: readonly ModelCatalogFailure[]
+}
+
+/** The slice of `ctx.remote.session` this page reads. */
 export interface ModelCatalogRemote {
-  listProviders?(): Promise<RemoteResultLike<readonly { id: string; name?: string }[]>>
-  listConfigurableProviders?(): Promise<
-    RemoteResultLike<readonly { provider: string; displayName?: string; settingsNs: string }[]>
-  >
-  discoverModels?(
-    settingsNs: string,
-    request: { provider?: string },
-  ): Promise<RemoteResultLike<readonly { id: string; name?: string }[]>>
+  modelCatalog?(): Promise<RemoteResultLike<ModelCatalogValue>>
 }
 
 /** Draft built from the accepted Host value. */
@@ -153,11 +175,11 @@ export function draftOf(value: Record<string, unknown> | undefined): Draft {
   }
 }
 
-/** Whether every worker route names a `provider/model` pair. */
+/** Whether every worker field is `auto` or names a `provider/model` pair. */
 export function draftIsValid(draft: Draft): boolean {
-  return ROUTE.test(draft.implementWorkerModel.trim())
-    && ROUTE.test(draft.plannerWorkerModel.trim())
-    && ROUTE.test(draft.verifyWorkerModel.trim())
+  return isSelectableRoute(draft.implementWorkerModel)
+    && isSelectableRoute(draft.plannerWorkerModel)
+    && isSelectableRoute(draft.verifyWorkerModel)
 }
 
 /** The message of a thrown value, for the catalog error notice. */
@@ -166,89 +188,69 @@ function messageOf(error: unknown): string {
   return typeof error === 'string' ? error : 'Unknown error.'
 }
 
-/** Read one `ok`/`value` envelope, throwing its message when it carries no list. */
-function resultList<T>(result: RemoteResultLike<readonly T[]>, fallback: string): readonly T[] {
-  if (result.ok !== true || !Array.isArray(result.value)) {
-    throw new Error(result.error?.message || fallback)
-  }
-  return result.value as readonly T[]
-}
-
 /**
- * Load every `provider/model` the Host has configured.
+ * Load the `provider/model` list the Host session model catalog advertises.
  *
- * The catalog is the union of the providers the registry knows and the ones
- * the settings service can describe, each asked for its own models. A provider
- * that fails discovery keeps its error and falls back to its built-in models
- * when it has them, so one broken provider never hides the rest; only an empty
- * catalog is an error.
- * @param remote - the Host LLM Remote, absent on an older Host.
- * @returns the sorted options, one per advertised model.
+ * 这是 composer 模型选择器渲染的同一份目录，按 provider 分组。静态声明在 bundle
+ * patch config 里的第三方 provider 也会出现在其中：它没有 settings profile 可供
+ * model discovery 读取，但 adapter 仍通过 listModels 公布自己的模型。
+ * 选项顺序沿用目录里 groups 与 models 的顺序（与 composer 一致），这里不再重排；
+ * 失败 provider 转成 probe，页面据此给出诊断与重试入口。
+ * @param remote - the Host session Remote, absent on an older Host.
+ * @returns the options, one per advertised model, plus one probe per failed provider.
  */
-export async function loadModelOptions(remote: ModelCatalogRemote | undefined): Promise<ModelOption[]> {
-  // Keep the receiver: the Host's Remote methods may read `this`, and they are
-  // also called from inside a `map` callback where narrowing would end.
-  const listProviders = remote?.listProviders?.bind(remote)
-  const listConfigurableProviders = remote?.listConfigurableProviders?.bind(remote)
-  const discoverModels = remote?.discoverModels?.bind(remote)
-  if (listProviders === undefined || listConfigurableProviders === undefined || discoverModels === undefined) {
-    throw new Error('The Host does not expose the LLM model Remote.')
+export async function loadModelOptions(remote: ModelCatalogRemote | undefined): Promise<ModelCatalog> {
+  // Keep the receiver: the Host's Remote methods may read `this`.
+  const modelCatalog = remote?.modelCatalog?.bind(remote)
+  if (modelCatalog === undefined) {
+    throw new Error('The Host does not expose the session model catalog Remote.')
   }
 
-  const [registered, configurable] = await Promise.all([listProviders(), listConfigurableProviders()])
-  const providers = resultList(registered, 'Could not read the configured providers.')
-  const entries = resultList(configurable, 'Could not read the configured providers.')
-  const known = new Set(providers.map(provider => provider.id))
-  const usable = entries.filter(entry => known.has(entry.provider)
-    && typeof entry.settingsNs === 'string'
-    && entry.settingsNs.trim() !== '')
-
-  const errors: string[] = []
-  const discovered = await Promise.all(usable.map(async (entry) => {
-    try {
-      const result = await discoverModels(entry.settingsNs, { provider: entry.provider })
-      if (result.ok !== true || !Array.isArray(result.value)) {
-        errors.push(result.error?.message || `Could not read the models of ${entry.provider}.`)
-        return { entry, models: [] as readonly { id: string; name?: string }[] }
-      }
-      return { entry, models: result.value as readonly { id: string; name?: string }[] }
-    } catch (error) {
-      errors.push(messageOf(error))
-      return { entry, models: [] as readonly { id: string; name?: string }[] }
-    }
-  }))
+  const result = await modelCatalog()
+  const value = result.ok === true ? result.value : undefined
+  if (typeof value !== 'object' || value === null) {
+    throw new Error(result.error?.message || 'Could not read the configured model catalog.')
+  }
+  const groups = Array.isArray(value.groups) ? value.groups : []
+  const failures = Array.isArray(value.failures) ? value.failures : []
 
   const byValue = new Map<string, ModelOption>()
-  for (const item of discovered) {
-    const models = item.models.length > 0
-      ? item.models
-      : BUILTIN_MODELS[item.entry.provider] ?? []
+  for (const group of groups) {
+    const provider = typeof group?.id === 'string' ? group.id.trim() : ''
+    if (provider === '') continue
+    const groupName = typeof group.name === 'string' ? group.name.trim() : ''
+    const providerLabel = groupName === '' ? provider : groupName
+    const models = Array.isArray(group.models) ? group.models : []
     for (const model of models) {
-      if (typeof model?.id !== 'string' || model.id.trim() === '') continue
-      const value = `${item.entry.provider}/${model.id}`
-      if (byValue.has(value)) continue
-      byValue.set(value, {
-        value,
-        provider: item.entry.provider,
-        model: model.id,
-        label: `${item.entry.displayName || item.entry.provider} · ${model.name?.trim() || model.id}`,
+      const id = typeof model?.id === 'string' ? model.id : ''
+      if (id.trim() === '') continue
+      const route = `${provider}/${id}`
+      if (byValue.has(route)) continue
+      const modelName = typeof model.name === 'string' ? model.name.trim() : ''
+      byValue.set(route, {
+        value: route,
+        provider,
+        model: id,
+        label: `${providerLabel} · ${modelName === '' ? id : modelName}`,
       })
     }
   }
 
   const options = [...byValue.values()]
-  options.sort((left, right) => (left.provider === right.provider
-    ? left.label.localeCompare(right.label)
-    : left.provider.localeCompare(right.provider)))
   if (options.length === 0) {
-    throw new Error(errors[0] || 'No configured provider advertised a model.')
+    throw new Error(failures[0]?.message || 'The Host advertised no models.')
   }
-  return options
+  const probes: ProviderProbe[] = failures.map(failure => ({
+    provider: failure.id,
+    error: failure.message,
+  }))
+  return { options, probes }
 }
 
 /**
  * Add the stored routes the catalog no longer advertises, marked `missing`, so
- * a select can still show what the settings hold instead of silently dropping it.
+ * the suggestion list can still show what the settings hold instead of silently
+ * dropping it. `auto` 由列表的固定首项提供，不进 missing 列表。
  * @param options - the loaded catalog.
  * @param current - the routes the draft currently holds.
  * @returns the options plus one entry per unknown stored route.
@@ -258,7 +260,7 @@ export function mergeCurrentModels(options: readonly ModelOption[], current: rea
   const values = new Set(options.map(option => option.value))
   for (const route of current) {
     const value = route.trim()
-    if (value === '' || values.has(value)) continue
+    if (value === '' || values.has(value) || isWorkerAuto(value)) continue
     values.add(value)
     const [provider = '', ...rest] = value.split('/')
     merged.push({ value, provider, model: rest.join('/'), label: value, missing: true })
@@ -266,14 +268,13 @@ export function mergeCurrentModels(options: readonly ModelOption[], current: rea
   return merged
 }
 
-/** Whether every worker route is non-empty and present in the catalog. */
-export function draftModelsValid(draft: Draft, options: readonly ModelOption[]): boolean {
-  const values = new Set(options.map(option => option.value))
-  return [draft.plannerWorkerModel, draft.implementWorkerModel, draft.verifyWorkerModel]
-    .every(route => {
-      const value = route.trim()
-      return value !== '' && values.has(value)
-    })
+/**
+ * Whether one explicit route is present in the loaded catalog.
+ * 仅用于提示：目录里没有的合法路由照样可以保存。
+ */
+export function routeInCatalog(route: string, options: readonly ModelOption[]): boolean {
+  const value = route.trim()
+  return isWorkerAuto(value) || options.some(option => option.value === value)
 }
 
 /**
@@ -323,9 +324,11 @@ function field(
 }
 
 /**
- * One worker-model field: a select over the configured catalog. A value the
- * catalog does not hold keeps its own `missing` entry, so the control shows it
- * and marks the field invalid instead of quietly picking a neighbour.
+ * One worker-model field: a native select over the Host's model catalog.
+ *
+ * `auto` is the first option and needs no catalog entry. A stored route the
+ * catalog does not advertise keeps its own `missing` entry, so the control
+ * shows what the settings hold instead of silently dropping it.
  */
 function modelField(
   id: string,
@@ -352,7 +355,7 @@ function modelField(
         'aria-invalid': invalid,
         onChange: (event: { target: { value: string } }) => { onChange(event.target.value) },
       },
-      h('option', { key: '', value: '', disabled: true }, t('config.modelPlaceholder')),
+      h('option', { key: WORKER_AUTO, value: WORKER_AUTO }, t('config.modelAuto')),
       ...options.map(option => h(
         'option',
         { key: option.value, value: option.value },
@@ -375,7 +378,9 @@ export function CodingConfigPage(props: CodingConfigPageProps): ReactElement {
   const [draft, setDraft] = useState<Draft>(() => draftOf(snapshot.value))
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [catalog, setCatalog] = useState<
-    { status: 'loading' } | { status: 'ready'; options: readonly ModelOption[] } | { status: 'error'; message: string }
+    | { status: 'loading' }
+    | { status: 'ready'; options: readonly ModelOption[]; probes: readonly ProviderProbe[] }
+    | { status: 'error'; message: string }
   >({ status: 'loading' })
   const [catalogRevision, setCatalogRevision] = useState(0)
 
@@ -386,12 +391,14 @@ export function CodingConfigPage(props: CodingConfigPageProps): ReactElement {
   }, [snapshot.value])
 
   // The selectable routes come from the Host's configured model catalog. A
-  // failure disables Save rather than letting an unverified route through.
+  // failure does not disable Save: `auto` needs no catalog entry, and the Host
+  // validates a stored route at dispatch. The notice names every provider that
+  // answered nothing, so a missing third-party model is diagnosable here.
   useEffect(() => {
     let cancelled = false
     setCatalog({ status: 'loading' })
     loadModelOptions(props.remote)
-      .then(options => { if (!cancelled) setCatalog({ status: 'ready', options }) })
+      .then(result => { if (!cancelled) setCatalog({ status: 'ready', options: result.options, probes: result.probes }) })
       .catch(error => { if (!cancelled) setCatalog({ status: 'error', message: messageOf(error) }) })
     return () => { cancelled = true }
   }, [props.remote, catalogRevision])
@@ -411,8 +418,7 @@ export function CodingConfigPage(props: CodingConfigPageProps): ReactElement {
     draft.implementWorkerModel,
     draft.verifyWorkerModel,
   ])
-  const modelsValid = catalog.status === 'ready' && draftModelsValid(draft, options)
-  const routeKnown = (route: string): boolean => options.some(option => option.value === route.trim())
+  const routeKnown = (route: string): boolean => routeInCatalog(route, options)
   const dirty = draft.defaultMode !== fieldOf(value, 'defaultMode', 'auto')
     || draft.implementWorkerModel !== fieldOf(value, 'implementWorkerModel')
     || draft.plannerWorkerModel !== fieldOf(value, 'plannerWorkerModel')
@@ -421,10 +427,16 @@ export function CodingConfigPage(props: CodingConfigPageProps): ReactElement {
     || draft.reasoning !== fieldOf(value, 'reasoning', 'auto')
   const commands = commandLines(value['verificationCommands'])
   const readOnly = snapshot.writable !== true
+  const probeSummary: readonly ProviderProbe[] = catalog.status === 'ready'
+    ? catalog.probes
+    : []
+  const probeNote = probeSummary.length === 0
+    ? ''
+    : ` ${t('config.modelProbeFailed')} ${probeSummary.slice(0, 3).map(probe => (probe.error === undefined ? probe.provider : `${probe.provider} (${probe.error})`)).join('; ')}`
   const modelNotice = catalog.status === 'ready'
     ? {
-      text: t('config.modelWarning'),
-      className: modelsValid ? 'dsh-coding-hint dsh-coding-notice' : 'dsh-coding-warn dsh-coding-notice',
+      text: `${t('config.modelWarning')}${probeNote}`,
+      className: routesValid ? 'dsh-coding-hint dsh-coding-notice' : 'dsh-coding-warn dsh-coding-notice',
     }
     : catalog.status === 'error'
       ? {
@@ -434,7 +446,7 @@ export function CodingConfigPage(props: CodingConfigPageProps): ReactElement {
       : { text: t('config.modelsLoading'), className: 'dsh-coding-hint dsh-coding-notice' }
 
   async function save(): Promise<void> {
-    if (status === 'saving' || !routesValid || !modelsValid || readOnly) return
+    if (status === 'saving' || !routesValid || readOnly) return
     setStatus('saving')
     try {
       const accepted = await form.mutate(buildConfigOps(draft, value), snapshot.revision)
@@ -611,7 +623,7 @@ export function CodingConfigPage(props: CodingConfigPageProps): ReactElement {
         {
           type: 'button',
           className: 'dsh-coding-button dsh-coding-button-lg',
-          disabled: readOnly || status === 'saving' || !routesValid || !modelsValid || !dirty,
+          disabled: readOnly || status === 'saving' || !routesValid || !dirty,
           onClick: () => { void save() },
         },
         status === 'saving' ? t('config.saving') : t('config.save'),

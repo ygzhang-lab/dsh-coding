@@ -44,7 +44,7 @@ export const NS = 'dsh-coding'
 const PACKAGE_NAME = 'dsh-coding'
 
 /** Client services this half needs before it can register anything. */
-export const inject = ['slots', 'locale', 'uiConversation', 'configForms', 'remote', 'remote.commands', 'remote.llm']
+export const inject = ['slots', 'locale', 'uiConversation', 'configForms', 'remote', 'remote.commands', 'remote.session']
 
 /** The slice of the commands Remote the turn card calls. */
 interface CommandRemote {
@@ -73,13 +73,28 @@ export function apply(ctx: ClientContext): void {
   // reads the pinned reasoning policy as a label only. The form owns the write
   // queue (revision fence, Host validation, recovery read).
   const forms = (ctx as unknown as { configForms: { get(id: string): CodingConfigForm } }).configForms
-  const form = forms.get(SETTINGS_NAMESPACE)
-  // The model catalog lives on the `llm` namespace of the Host Remote, not on
-  // the Remote root. Read it from there so `listProviders` /
-  // `listConfigurableProviders` / `discoverModels` resolve.
-  const llmRemote = (ctx as unknown as {
-    remote?: { llm?: ModelCatalogRemote }
-  }).remote?.llm
+  // 当前 DSH 版本按条目 id 提供表单，但条目缺失时 `get` 可能返回 undefined：
+  // 页面包装层必须先给出提示，不能让整块配置区随渲染异常一起消失。
+  const form = forms.get(SETTINGS_NAMESPACE) as CodingConfigForm | undefined
+  // The model catalog is the Host session catalog the composer renders, so a
+  // third-party provider declared statically in a patch config is listed too.
+  // Resolve the namespace lazily: the page reads its catalog when it opens, and
+  // a late-arriving service must never keep this bundle from registering.
+  const sessionRemote: ModelCatalogRemote = {
+    modelCatalog: () => {
+      // 读命名空间本身也可能抛错（服务尚未挂载）：统一转成 rejected Promise，
+      // 页面的 effect 只按目录加载失败处理，不影响其它槽位。
+      try {
+        const session = (ctx as unknown as { remote?: { session?: ModelCatalogRemote } }).remote?.session
+        if (typeof session?.modelCatalog !== 'function') {
+          return Promise.reject(new Error('The Host does not expose the session model catalog Remote.'))
+        }
+        return session.modelCatalog()
+      } catch {
+        return Promise.reject(new Error('The Host does not expose the session model catalog Remote.'))
+      }
+    },
+  }
   const settingsValue = (): unknown => {
     try {
       return form?.getSnapshot?.()?.value?.reasoning
@@ -146,12 +161,15 @@ export function apply(ctx: ClientContext): void {
   // Host form from `ctx.configForms` by entry id. The form owns the write queue
   // (revision fence, Host validation, recovery read): this page never calls
   // `ctx.remote.settings` itself.
-  const configPage = (props: any) => h(CodingConfigPage, {
-    ...props,
-    form,
-    remote: llmRemote,
-    t: props.t ?? translate,
-  })
+  const configPage = (props: any) => form === undefined
+    ? h('p', { className: 'dsh-coding-hint' }, (props.t ?? translate)('config.unavailable'))
+    : h(CodingConfigPage, {
+      ...props,
+      form,
+      // 模型下拉读 `ctx.remote.session.modelCatalog`，与 composer 用同一份目录。
+      remote: sessionRemote,
+      t: props.t ?? translate,
+    })
   ctx.effect(() => slots.inject('plugins.bundle.config', () => slots.register({
     name: 'plugins.bundle.config',
     key: PACKAGE_NAME,
