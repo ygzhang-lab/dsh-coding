@@ -13,6 +13,27 @@
 - planner 为 `auto` 时视为主代理自己就是 planner：`leadIsPlanner` 直接为真、`requirePlanner` 门禁跳过、不读模型选择也不派发 planner。
 - 配置页三个模型下拉首项是「自动（跟随主代理当前模型）」；保存只校验格式（`auto` 或 `provider/model`），`auto` 不需要出现在模型目录里；目录里没有的已保存路由仍显示为“不在当前模型列表”。
 - README 新增「推荐组合」小节：全自动（默认）、编排自动 + planner 显式 pro、全显式三种组合，并写明 `auto` 的三条语义；`docs/DETAIL.md` 的模型路由小节与配置参考表同步改为 `auto` 语义。
+
+### 变更
+
+- 模型路由文档与市场文案改述：不再写“Pro 负责分析需求、Flash 干活”这类固定默认路由的说法，改为「默认三个子代理跟随主代理当前模型（`auto`），可分别指定 planner / implement / verify 的模型」；`package.json` 的 `description` 与 `locale/zh.json`、`locale/en.json` 的 `meta.description` 同步（`meta.detail` 仍为 `README.md`）。
+- 显式 `provider/model` 的语义不变：缺失、格式错误或 provider 不存在时挂载失败，派发前仍校验模型可用性，失败时给出配置字段名、当前路由与可用模型；`auto` 只在派发期解析，绝不回退主代理其它路由。
+
+### 修复
+
+- 插件配置页的模型下拉改为读取 Host 会话模型目录 `ctx.remote.session.modelCatalog()`（与对话框模型选择器同源），修复通过 `cordis.patch.yml` 静态声明的第三方 provider（如 `qianwen-token-plan`）的模型在页面里看不到的问题；不再用 `llm.discoverModels` 逐个枚举 provider，目录顺序沿用 Host 的 provider 分组顺序，Host 列不出模型的 provider 显示为页面顶部诊断。
+
+### 测试
+
+- 测试总数从 174 增至 181，全部通过（`pnpm test`，先执行 `pnpm build`）。
+- worker 模型 `auto` 用例：`auto` 派发（`agentOptions` 等于主代理当前 provider/model）、主代理模型不可读时的 `AUTO_UNAVAILABLE` 拒绝（不启动 worker）、planner 为 `auto` 时门禁跳过（4 条 todo 直接进入 implement 且 planner 记录仍为空）、三个字段全 `auto` 可正常挂载。
+
+## 0.1.1-rc2（已发布）
+
+对应标签 `v0.1.1-rc2`，2026-11-23 已发布到 npm（`package.json` 版本为 `0.1.1-rc2`）。
+
+### 新增
+
 - 任务交接文档：`/coding memory` 在会话工作目录的 `.agents/memory/<sessionId>-<UTC YYYYMMDD-HHmmss>.md` 写一篇本轮交接 Markdown，内容只取状态机与 `coding_handoff` 记录，不回读对话正文；同名文件不覆盖。实现在 `src/memory.ts`，Host 侧经 fs 服务写盘。
 - planner 门禁：新增配置 `requirePlanner`（`complex` 默认 / `off`）。`complex` 下 codex 会话的任务单超过 3 条、尚未派发过 `delegate_plan`、且主 Agent 自身不是 planner 路由时，`coding_stage(implement)` 被拒并提示先派发 planner；该字段不可在插件页修改，写在 bundle 的 patch config 里。
 - 轮次卡片新增「结束任务并生成交接文档」按钮，仅在最新一轮、codex 模式、该轮冻结阶段为 deliver 且验证通过时出现。
@@ -22,8 +43,6 @@
 
 ### 变更
 
-- 模型路由文档与市场文案改述：不再写“Pro 负责分析需求、Flash 干活”这类固定默认路由的说法，改为「默认三个子代理跟随主代理当前模型（`auto`），可分别指定 planner / implement / verify 的模型」；`package.json` 的 `description` 与 `locale/zh.json`、`locale/en.json` 的 `meta.description` 同步（`meta.detail` 仍为 `README.md`）。
-- 显式 `provider/model` 的语义不变：缺失、格式错误或 provider 不存在时挂载失败，派发前仍校验模型可用性，失败时给出配置字段名、当前路由与可用模型；`auto` 只在派发期解析，绝不回退主代理其它路由。
 - 阶段工具边界调整：`exec` 类工具在 requirements / plan / implement / verify 准入，只有 deliver 不授予；实现阶段编辑文件仍然只能走 `delegate_implement`。
 - 文档新增「会话边界」约定：一个 Coding 会话只服务一个任务，换任务请新开会话。原因是 `coding_handoff` 的列表字段只追加（只有 `goal` / `delivered` 覆盖），复用会话会让上一个任务的 `acceptance` 满足新任务的 verify / deliver 门禁；`coding_handoff({ reset: true })` 只重置验证重试预算。
 - README「使用」新增第 4 条会话边界提示（一次会话只跑一个任务，换任务请新开会话），与上面的约定同义，面向使用者。
@@ -36,12 +55,10 @@
 
 - `scripts/build.mjs` 的目录原子换入在 Windows 上偶发 `EPERM`：新增 `renameWithRetry`，仅对 `EPERM` / `EBUSY` / `EACCES` 按 100ms × attempt 退避、最多 10 次；原子替换与失败回滚语义不变。
 - 发布前检查修复：Coding 预设 `description` 结尾的双句点与行尾多余空格；根 `AGENTS.md` 与 `docs/DETAIL.md` 指向 `src/`、`test/`、`scripts/` 三个目录级文件的链接改为 GitHub 绝对地址（这三个文件不随 npm 包发布，相对链接在 npm 页面上会 404）。
-- 插件配置页的模型下拉改为读取 Host 会话模型目录 `ctx.remote.session.modelCatalog()`（与对话框模型选择器同源），修复通过 `cordis.patch.yml` 静态声明的第三方 provider（如 `qianwen-token-plan`）的模型在页面里看不到的问题；不再用 `llm.discoverModels` 逐个枚举 provider，目录顺序沿用 Host 的 provider 分组顺序，Host 列不出模型的 provider 显示为页面顶部诊断。
 
 ### 测试
 
-- 测试总数 181，全部通过（`pnpm test`，先执行 `pnpm build`）。新增 `test/memory.test.mjs`（交接文档组装与写盘），并补充交接文档按钮、`delivered` / `followUps` 合并、`needsWorkspaceInstructions` 判定边界、verify 预设的条件选择、`requirePlanner` 门禁、shell 阶段准入、`agent-instructions` 预设行等断言。
-- worker 模型 `auto` 用例：`auto` 派发（`agentOptions` 等于主代理当前 provider/model）、主代理模型不可读时的 `AUTO_UNAVAILABLE` 拒绝（不启动 worker）、planner 为 `auto` 时门禁跳过（4 条 todo 直接进入 implement 且 planner 记录仍为空）、三个字段全 `auto` 可正常挂载。
+- 测试总数 174，全部通过（`pnpm test`，先执行 `pnpm build`）。新增 `test/memory.test.mjs`（交接文档组装与写盘），并补充交接文档按钮、`delivered` / `followUps` 合并、`needsWorkspaceInstructions` 判定边界、verify 预设的条件选择、`requirePlanner` 门禁、shell 阶段准入、`agent-instructions` 预设行等断言。
 
 ## 0.1.1-rc1（已发布）
 
