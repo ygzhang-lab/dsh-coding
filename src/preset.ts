@@ -18,6 +18,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { type CodingConfig, type ReasoningMode } from './config.js'
+import { isWorkerAuto } from './worker-auto.js'
 import { ReasoningController } from './reasoning.js'
 import { reasoningProjection } from './reasoning-projection.js'
 import { writeMemoryDocument } from './memory.js'
@@ -26,9 +27,12 @@ import { failureNotice, makeFailure, type FailurePoint } from './failures.js'
 import {
   assertWorkerModel,
   describeProviders,
+  leadRouteOf,
   resolveWorkerRoute,
+  workerField,
   workerPreset,
   WORKER_ROLES,
+  type ResolvedWorkerRoute,
   type WorkerRole,
 } from './models.js'
 import {
@@ -352,9 +356,13 @@ export async function apply(ctx: any): Promise<void> {
 
   /**
    * 主 Agent 自身是否就是配置的 planner 路由：这时 planner worker 是多余的，
-   * 门禁直接放行。读不到模型选择时按“不是”处理，门禁照常生效。
+   * 门禁直接放行。planner 配置为 `auto` 时主 Agent 就是 planner，直接视为真。
+   * 读不到模型选择时按“不是”处理，门禁照常生效。
    */
   const leadIsPlanner = (agent: any): boolean => {
+    // `auto` 表示 planner 就是主代理当前模型：门禁语义上不成立，因此不必读
+    // 模型选择，也不会因为读不到而抛错。
+    if (isWorkerAuto(config().plannerWorkerModel)) return true
     try {
       const current = agent?.model?.current?.()
       if (typeof current?.provider !== 'string' || typeof current?.model !== 'string') return false
@@ -1110,7 +1118,15 @@ export async function apply(ctx: any): Promise<void> {
     const task = typeof args?.task === 'string' ? args.task.trim() : ''
     if (task === '') throw new Error(`delegate_${role}: task must be a non-empty self-contained brief`)
     const files = Array.isArray(args.files) ? args.files.filter((file): file is string => typeof file === 'string') : []
-    const route = resolveWorkerRoute(config(), role)
+    // `auto` 在派发这一刻解析为主代理当前模型；解析不出来就是派发失败，
+    // 不占 worker 槽位、不写 planner 尝试，也绝不替换成别的路由。
+    let route: ResolvedWorkerRoute
+    try {
+      route = resolveWorkerRoute(config(), role, leadRouteOf(exec.agent))
+    } catch (error) {
+      fail(state, 'delegate', error)
+      throw new Error(`${messageOf(error)} Fix the worker model configuration and call delegate_${role} again.`)
+    }
     const workerName = `${role}-${Date.now().toString(36)}-${(workerSeq += 1)}`
     const startedAt = Date.now()
     // Reserve the single worker slot before the model check awaits: a
@@ -1615,15 +1631,20 @@ function messageOf(error: unknown): string {
 
 /**
  * Fail the mount when the runtime cannot honour its own gates: a worker route
- * that could silently fall back to the lead's model, or a subagent backend that
- * cannot carry the explicit worker preset.
+ * that cannot be honoured, or a subagent backend that cannot carry the explicit
+ * worker preset. `auto` fields are skipped here: the mount has no agent context
+ * to resolve the lead's model from, so `auto` is checked at dispatch instead.
  * @param ctx - plugin context.
  * @param config - verified configuration.
  */
 async function preflight(ctx: any, config: CodingConfig): Promise<void> {
-  // Every worker route is parsed eagerly, so a malformed field fails the mount
-  // instead of the first dispatch.
-  const routes = WORKER_ROLES.map(role => resolveWorkerRoute(config, role))
+  // Every explicit route is parsed eagerly, so a malformed field fails the mount
+  // instead of the first dispatch. `auto` names no provider yet — it resolves
+  // against the lead's model at dispatch, where `assertWorkerModel` checks it —
+  // so the mount only has to leave it alone.
+  const routes = WORKER_ROLES
+    .filter(role => !isWorkerAuto(config[workerField(role)]))
+    .map(role => resolveWorkerRoute(config, role))
 
   const provider = ctx.subagents?.getProvider?.('spawn')
   if (provider === undefined) {

@@ -12,18 +12,21 @@
 # so the parent's tool restrictions are never inherited — the composition is the
 # only honest place to state what a worker may hold.
 - insert:
-    # Verified configuration. `implementWorkerModel` / `verifyWorkerModel` are
-    # required `provider/model` routes: a worker never falls back to the lead's
-    # model, and an unset route fails the mount instead of spending tokens.
+    # Verified configuration. The three worker routes default to `auto`: each
+    # worker follows the model the lead picked in the chat box, resolved at
+    # dispatch time and still checked against the provider registry and model
+    # catalog. Set an explicit `provider/model` route to give a worker its own
+    # model. `auto` is never a silent substitution: an unreadable lead model
+    # fails the dispatch, and an unset field fails the mount.
     - id: dsh-coding
       name: "dsh-coding"
       config:
         defaultMode: auto
-        implementWorkerModel: deepseek-account/deepseek-flash
-        plannerWorkerModel: deepseek-account/deepseek-v4-pro
+        implementWorkerModel: auto
+        plannerWorkerModel: auto
         # planner 门禁：complex 时 codex 复杂任务（任务单 >3 条）必须先派发 delegate_plan；off 关闭。
         requirePlanner: complex
-        verifyWorkerModel: deepseek-account/deepseek-flash
+        verifyWorkerModel: auto
         # auto follows the DSH interface locale, then the host locale; zh/en pin it.
         language: auto
         # auto classifies each turn; low/high/max pin every turn.

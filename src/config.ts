@@ -5,9 +5,9 @@
  * TypeScript, {@link Config} (Schemastery) for the Loader's activation-time
  * validation, and {@link configJsonSchema} for non-Loader consumers such as the
  * plugin page and the tests. `normalizeConfig` adds the checks a schema cannot
- * state — in particular that a worker model names a real `provider/model`
- * route, because a silent fall-back to the lead's own model is the one outcome
- * this plugin must never allow.
+ * state — in particular that a worker model is either the explicit `auto`
+ * sentinel or a real `provider/model` route, because a silent fall-back to the
+ * lead's own model is the one outcome this plugin must never allow.
  *
  * @module dsh-coding/config
  */
@@ -15,6 +15,7 @@ import z from '@deepseek-ai/schemastery'
 import { CODING_MODES, type CodingMode } from './stages.js'
 import { LANGUAGE_MODES, normalizeLanguageMode, type LanguageMode } from './language.js'
 import { volatileValue } from './volatile.js'
+import { isWorkerAuto, WORKER_AUTO } from './worker-auto.js'
 
 export { volatileValue }
 
@@ -37,18 +38,26 @@ export interface WorkerRoute {
 /**
  * Verified plugin configuration.
  *
- * Every field is required or defaulted by {@link Config}; the worker routes are
- * required strings because dispatch refuses to inherit the lead's model.
+ * Every field is required or defaulted by {@link Config}; the worker model
+ * fields are required strings holding either `auto` (follow the lead's current
+ * model at dispatch) or a concrete `provider/model` route.
  */
 export interface CodingConfig {
   /** Mode a new Coding session starts in. Defaults to `auto`. */
   readonly defaultMode: CodingMode
-  /** `provider/model` route for the implement worker. Required. */
+  /**
+   * Route of the implement worker. Required: either `auto` (follow the lead's
+   * current model at dispatch) or a concrete `provider/model` route.
+   */
   readonly implementWorkerModel: string
-  /** `provider/model` route for the verify worker. Required. */
+  /**
+   * Route of the verify worker. Required: either `auto` (follow the lead's
+   * current model at dispatch) or a concrete `provider/model` route.
+   */
   readonly verifyWorkerModel: string
   /**
-   * `provider/model` route for the planner worker (pro model). Required.
+   * Route of the planner worker (pro model). Required: either `auto` (follow
+   * the lead's current model at dispatch) or a concrete `provider/model` route.
    */
   readonly plannerWorkerModel: string
   /**
@@ -144,18 +153,18 @@ export const configJsonSchema = {
     },
     implementWorkerModel: {
       type: 'string',
-      pattern: '^[^/\\s]+/[^/\\s]+$',
-      description: 'provider/model route for the implement worker; never inherited from the lead.',
+      pattern: '^(auto|[^/\\s]+/[^/\\s]+)$',
+      description: '`auto` follows the lead\'s current model at dispatch; otherwise a provider/model route for the implement worker; never inherited from the lead.',
     },
     verifyWorkerModel: {
       type: 'string',
-      pattern: '^[^/\\s]+/[^/\\s]+$',
-      description: 'provider/model route for the verify worker; never inherited from the lead.',
+      pattern: '^(auto|[^/\\s]+/[^/\\s]+)$',
+      description: '`auto` follows the lead\'s current model at dispatch; otherwise a provider/model route for the verify worker; never inherited from the lead.',
     },
     plannerWorkerModel: {
       type: 'string',
-      pattern: '^[^/\\s]+/[^/\\s]+$',
-      description: 'provider/model route for the planner worker (pro model); never inherited from the lead.',
+      pattern: '^(auto|[^/\\s]+/[^/\\s]+)$',
+      description: '`auto` follows the lead\'s current model at dispatch; otherwise a provider/model route for the planner worker (pro model); never inherited from the lead.',
     },
     requirePlanner: {
       type: 'string',
@@ -215,7 +224,8 @@ export type VerificationScope = typeof VERIFICATION_SCOPES[number]
 /**
  * Parse a `provider/model` route. Both halves are required: an omitted provider
  * would let the request silently inherit the lead's route, which is exactly the
- * fall-back the plugin refuses.
+ * fall-back the plugin refuses. The `auto` sentinel never reaches this function:
+ * it is accepted by {@link normalizeConfig} and resolved at dispatch time.
  * @param raw - configured route text.
  * @param field - configuration field name, for an actionable failure.
  * @returns the split route.
@@ -225,15 +235,15 @@ export function parseWorkerRoute(raw: unknown, field: string): WorkerRoute {
   const text = typeof raw === 'string' ? raw.trim() : ''
   if (text === '') {
     throw new Error(
-      `dsh-coding: ${field} is required and must be a "provider/model" route `
-      + '(for example "deepseek-account/deepseek-flash"); the worker never inherits the lead\'s model',
+      `dsh-coding: ${field} is required: set it to "auto" (follow the lead's current model) `
+      + 'or a "provider/model" route (for example "deepseek-account/deepseek-flash")',
     )
   }
   const match = /^([^/\s]+)\/([^/\s]+)$/u.exec(text)
   if (match === null) {
     throw new Error(
-      `dsh-coding: ${field} must be "provider/model" (got ${JSON.stringify(text)}); `
-      + 'the worker never inherits the lead\'s model',
+      `dsh-coding: ${field} must be "auto" or "provider/model" (got ${JSON.stringify(text)}); `
+      + 'a route looks like "deepseek-account/deepseek-flash"',
     )
   }
   return { provider: match[1] as string, model: match[2] as string }
@@ -244,7 +254,8 @@ export function parseWorkerRoute(raw: unknown, field: string): WorkerRoute {
  * direct `apply()` call would otherwise miss.
  * @param raw - Loader-validated config, or a hand-authored object in tests.
  * @returns the verified configuration.
- * @throws when a worker route is absent or malformed.
+ * @throws when a worker model field is absent, neither `auto` nor a
+ * `provider/model` route, or malformed.
  */
 export function normalizeConfig(raw: Partial<CodingConfig> | undefined): CodingConfig {
   const mode = volatileValue(raw?.defaultMode) as CodingMode | undefined
@@ -264,15 +275,18 @@ export function normalizeConfig(raw: Partial<CodingConfig> | undefined): CodingC
   const requirePlanner = volatileValue(raw?.requirePlanner)
   const language = volatileValue(raw?.language)
   const reasoning = volatileValue(raw?.reasoning)
-  // Parse eagerly so a malformed route fails activation, not the first dispatch.
-  parseWorkerRoute(implementWorkerModel, 'implementWorkerModel')
-  parseWorkerRoute(verifyWorkerModel, 'verifyWorkerModel')
-  parseWorkerRoute(plannerWorkerModel, 'plannerWorkerModel')
+  // `auto` is accepted verbatim: the route is resolved at dispatch, where the
+  // lead's current model is readable. Any other value must already be a route.
+  const workerField = (value: unknown, field: string): string => {
+    if (isWorkerAuto(value)) return WORKER_AUTO
+    parseWorkerRoute(value, field)
+    return String(value).trim()
+  }
   return {
     defaultMode: mode !== undefined && (CODING_MODES as readonly string[]).includes(mode) ? mode : 'auto',
-    implementWorkerModel: String(implementWorkerModel).trim(),
-    verifyWorkerModel: String(verifyWorkerModel).trim(),
-    plannerWorkerModel: String(plannerWorkerModel).trim(),
+    implementWorkerModel: workerField(implementWorkerModel, 'implementWorkerModel'),
+    verifyWorkerModel: workerField(verifyWorkerModel, 'verifyWorkerModel'),
+    plannerWorkerModel: workerField(plannerWorkerModel, 'plannerWorkerModel'),
     requirePlanner: (PLANNER_GATE_MODES as readonly string[]).includes(requirePlanner as string)
       ? requirePlanner as PlannerGateMode
       : 'complex',

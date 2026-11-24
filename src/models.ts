@@ -5,13 +5,16 @@
  * A worker must never fall back to the lead's own model, so the route is read
  * from the configuration field named by the role, validated as `provider/model`,
  * and checked against the live provider registry and model catalog before the
- * subagent starts. Every lookup here goes to the live service: configuration is
- * volatile and may change between two dispatches, so nothing is cached.
+ * subagent starts. The one exception is the explicit `auto` sentinel: it is
+ * resolved here, at dispatch time, to the route the lead has selected right now.
+ * Every lookup here goes to the live service: configuration is volatile and may
+ * change between two dispatches, so nothing is cached.
  *
  * @module dsh-coding/models
  */
 import { parseWorkerRoute, type CodingConfig, type WorkerRoute } from './config.js'
 import { WORKER_PRESETS } from './stages.js'
+import { isWorkerAuto, WORKER_AUTO } from './worker-auto.js'
 
 /** The worker roles this package dispatches. */
 export type WorkerRole = 'plan' | 'implement' | 'verify'
@@ -26,10 +29,38 @@ export interface ResolvedWorkerRoute extends WorkerRoute {
   readonly field: string
   /** The route as `provider/model`, safe to quote in a message. */
   readonly text: string
+  /** Whether the configured field was `auto`; provider/model always concrete. */
+  readonly auto: boolean
+}
+
+/** The lead's route as read at dispatch time, or why it cannot be read. */
+export type LeadRoute =
+  | { readonly provider: string; readonly model: string }
+  | { readonly unavailable: string }
+
+/**
+ * Read the lead agent's current model selection without ever throwing.
+ * `auto` resolves to exactly this route at dispatch time.
+ * @param agent - the delegating agent.
+ * @returns the concrete route, or the reason it is unavailable.
+ */
+export function leadRouteOf(agent: any): LeadRoute {
+  try {
+    const current = agent?.model?.current?.()
+    if (typeof current?.provider !== 'string' || current.provider === '') {
+      return { unavailable: 'the lead has no model selection yet' }
+    }
+    if (typeof current?.model !== 'string' || current.model === '') {
+      return { unavailable: 'the lead has no model selection yet' }
+    }
+    return { provider: current.provider, model: current.model }
+  } catch (error) {
+    return { unavailable: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /** Why a worker route cannot be dispatched. */
-export type WorkerModelErrorCode = 'PROVIDER_MISSING' | 'MODEL_UNAVAILABLE'
+export type WorkerModelErrorCode = 'PROVIDER_MISSING' | 'MODEL_UNAVAILABLE' | 'AUTO_UNAVAILABLE'
 
 /** The configuration field each role's route is read from. */
 const WORKER_FIELDS: Readonly<
@@ -59,15 +90,37 @@ export function workerPreset(role: WorkerRole): string {
 
 /**
  * Read, validate, and describe one role's configured route.
+ *
+ * `auto` needs the caller to pass the lead's route (read with {@link leadRouteOf});
+ * without it the dispatch is refused with `AUTO_UNAVAILABLE` rather than
+ * resolved some other way.
  * @param config - verified configuration.
  * @param role - worker about to be dispatched.
- * @returns the parsed route plus its role, field, and rendered text.
- * @throws when the field is not exactly `provider/model`.
+ * @param lead - the lead's route at dispatch time, required when the field is `auto`.
+ * @returns the resolved route plus its role, field, rendered text, and `auto` flag.
+ * @throws when the field is neither `auto` nor exactly `provider/model`, or when
+ * it is `auto` and the lead's model cannot be read.
  */
-export function resolveWorkerRoute(config: CodingConfig, role: WorkerRole): ResolvedWorkerRoute {
+export function resolveWorkerRoute(config: CodingConfig, role: WorkerRole, lead?: LeadRoute): ResolvedWorkerRoute {
   const field = workerField(role)
-  const route = parseWorkerRoute(config[field], field)
-  return { role, field, provider: route.provider, model: route.model, text: `${route.provider}/${route.model}` }
+  const configured = config[field]
+  if (isWorkerAuto(configured)) {
+    // `auto` follows the model the lead picked in the chat box. A route that
+    // cannot be read is a refusal, not a fall-back: substituting another model
+    // is exactly the outcome this plugin must never produce silently.
+    if (lead === undefined || 'unavailable' in lead) {
+      const why = lead === undefined ? 'no lead agent was supplied' : lead.unavailable
+      throw new WorkerModelError(
+        `delegate_${role}: ${field} is "auto", which follows the lead's current model, `
+        + `but that model could not be read (${why}). Pick a model in the chat box, or set ${field} `
+        + `to an explicit "provider/model" route in the plugin page; no other route is substituted.`,
+        { code: 'AUTO_UNAVAILABLE', role, field, route: WORKER_AUTO, available: [] },
+      )
+    }
+    return { role, field, provider: lead.provider, model: lead.model, text: `${lead.provider}/${lead.model}`, auto: true }
+  }
+  const route = parseWorkerRoute(configured, field)
+  return { role, field, provider: route.provider, model: route.model, text: `${route.provider}/${route.model}`, auto: false }
 }
 
 /** A refused worker route: the configured value, and what the runtime offers instead. */
@@ -159,11 +212,12 @@ export async function assertWorkerModel(
   route: ResolvedWorkerRoute,
   signal?: AbortSignal,
 ): Promise<void> {
+  const shown = route.auto ? `"auto" -> "${route.text}"` : `"${route.text}"`
   const providers = describeProviders(ctx)
   if (providers.length > 0 && !providers.includes(route.provider)) {
     const available = providers.slice(0, 10).join(', ') + (providers.length > 10 ? ', …' : '')
     throw new WorkerModelError(
-      `delegate_${route.role}: ${route.field} names LLM provider "${route.provider}", which is not registered; `
+      `delegate_${route.role}: ${route.field} = ${shown} names LLM provider "${route.provider}", which is not registered; `
       + `available providers: ${available || '(none)'}. Fix ${route.field} in the plugin page or cordis.patch.yml; `
       + 'a worker never falls back to the lead\'s model.',
       { code: 'PROVIDER_MISSING', role: route.role, field: route.field, route: route.text, available: providers },
@@ -178,7 +232,7 @@ export async function assertWorkerModel(
     const ids = await listModelIds(ctx, route.provider, signal).catch(() => [])
     const available = ids.slice(0, 10).join(', ') + (ids.length > 10 ? ', …' : '')
     throw new WorkerModelError(
-      `delegate_${route.role}: ${route.field} = "${route.text}" is not a usable model route: ${messageOf(error)}. `
+      `delegate_${route.role}: ${route.field} = ${shown} is not a usable model route: ${messageOf(error)}. `
       + `Available models for provider "${route.provider}": ${available || '(none advertised)'}. `
       + `Fix ${route.field} in the plugin page or cordis.patch.yml; the worker never falls back to the lead's model.`,
       { code: 'MODEL_UNAVAILABLE', role: route.role, field: route.field, route: route.text, available: ids },
