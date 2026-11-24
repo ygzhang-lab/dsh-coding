@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "DSH Coding agent",
-    "description": "DSH programming intelligent agent plugin, engineering task orchestration mechanism, Codex five-stage contract progressing layer by layer, Pro model responsible for analyzing requirements/orchestrating tasks, delegating to sub-agents to isolate various tasks and using Flash model to perform work, ensuring task delivery quality and maximizing Token value.",
+    "description": "DSH programming intelligent agent plugin, engineering task orchestration mechanism, Codex five-stage contract progressing layer by layer; the three sub-agents follow the lead's current model by default (auto), and the planner / implement / verify models can be set individually, ensuring task delivery quality and maximizing Token value.",
     "detail": "README.md"
   }
 }

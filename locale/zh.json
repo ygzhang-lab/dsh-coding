@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "DSH Coding 编程智能体",
-    "description": "DSH 编程智能体插件，工程化任务编排机制，Codex 五段式契约层层推进，Pro 模型负责分析需求/编排任务，交由子代理隔离各项任务使用 Flash 模型干活，确保任务交付质量和 Token 价值最大化。",
+    "description": "DSH 编程智能体插件，工程化任务编排机制，Codex 五段式契约层层推进；默认三个子代理跟随主代理当前模型（auto），也可分别指定 planner / implement / verify 的模型，确保任务交付质量和 Token 价值最大化。",
     "detail": "README.md"
   }
 }
