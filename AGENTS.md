@@ -67,7 +67,7 @@ pnpm pack --dry-run   # 检查 files 是否包含 lib/locale/docs/icon/patch
 pnpm publish          # prepublishOnly 会再跑一遍 typecheck/build/test
 ```
 
-本地安装调试：`plugin_manager install_bundle` 传工作区绝对路径，或 `dsh plugin --profile <profile> add /绝对路径`。替换已安装版本需先移除再安装（同一路径的 `link:` 会直接读取新产物，但正在运行的 JS 需要重载）。
+本地安装调试：把工作区挂进正在用的 profile（默认 `desktop`）**照 [scripts/AGENTS.md](scripts/AGENTS.md) 的「本地 profile 挂载」三步做**——`link:` 依赖 + `dsh.profile.bundles` + `node_modules` 软链；profile 配置由 HMR 监听，改完自动重组合；改 `lib/` 里的代码后要重启。`desktop` profile 被 App 独占，CLI 的 `dsh plugin --profile desktop ...` 会拒绝执行，不要在这上面绕路；也不要去逆向 `app.asar` 的安装实现。同一路径的 `link:` 不需要「先移除再安装」，重组合/重载即可换到新产物。
 
 ## 5. 跨平台注意事项
 
