@@ -30,9 +30,9 @@ const {
   draftOf,
   buildConfigOps,
   draftIsValid,
-  draftModelsValid,
   loadModelOptions,
   mergeCurrentModels,
+  routeInCatalog,
 } = await import('../lib/client/config-page.js')
 
 /** Load the browser bundle the way `window.__ModuleLoader__` would. */
@@ -91,18 +91,26 @@ function createClientContext() {
       },
     },
     remote: {
-      llm: {
-        async listProviders() {
-          return { ok: true, value: [{ id: 'deepseek-account', name: 'DeepSeek Account' }] }
-        },
-        async listConfigurableProviders() {
+      session: {
+        async modelCatalog() {
           return {
             ok: true,
-            value: [{ provider: 'deepseek-account', displayName: 'DeepSeek Account', settingsNs: 'llm-deepseek-account' }],
+            value: {
+              groups: [
+                {
+                  id: 'deepseek-account',
+                  name: 'DeepSeek Account',
+                  models: [{ id: 'deepseek-v4-pro', name: 'V4 Pro' }, { id: 'deepseek-flash' }],
+                },
+                {
+                  id: 'qianwen-token-plan',
+                  name: 'Qianwen AI Platform',
+                  models: [{ id: 'qwen3.8-max', name: 'Qwen 3.8 Max' }, { id: 'qwen3.8-flash' }],
+                },
+              ],
+              failures: [],
+            },
           }
-        },
-        async discoverModels() {
-          return { ok: true, value: [{ id: 'deepseek-v4-pro', name: 'V4 Pro' }, { id: 'deepseek-flash' }] }
         },
       },
       commands: {
@@ -142,7 +150,7 @@ function slotOf(registrations, owner) {
 test('the bundle registers the card, the capsule, the command row, and the configuration page as effects', () => {
   const { id, exports } = loadClientBundle()
   assert.equal(id, 'dsh-coding')
-  assert.deepEqual(exports.inject, ['slots', 'locale', 'uiConversation', 'configForms', 'remote', 'remote.commands', 'remote.llm'])
+  assert.deepEqual(exports.inject, ['slots', 'locale', 'uiConversation', 'configForms', 'remote', 'remote.commands', 'remote.session'])
 
   const { ctx, registrations } = createClientContext()
   exports.apply(ctx)
@@ -217,40 +225,101 @@ test('the configuration page receives the Host form', () => {
   const page = slotOf(registrations, 'plugins.bundle.config')
   const element = page.component({ view: 'page', t: (key) => key })
   assert.equal(element.props.form, form, 'the page renders with the shared Host form')
-  assert.equal(element.props.remote, ctx.remote.llm, 'the page reads the LLM Remote namespace')
+  assert.equal(typeof element.props.remote.modelCatalog, 'function', 'the page receives a lazy catalog reader')
   assert.equal(typeof element.props.t, 'function')
 })
 
-test('the configuration page loads selectable models from the Host Remote', async () => {
+test('the configuration page registers before the session Remote is ready', async () => {
+  const { exports } = loadClientBundle()
+  const { ctx, registrations } = createClientContext()
+  let session
+  Object.defineProperty(ctx.remote, 'session', {
+    configurable: true,
+    get() {
+      if (session === undefined) throw new Error('the session Remote is not mounted yet')
+      return session
+    },
+    set(value) { session = value },
+  })
+  // apply() must not read the namespace: the throwing getter would abort it.
+  exports.apply(ctx)
+  const page = slotOf(registrations, 'plugins.bundle.config')
+  const element = page.component({ view: 'page', t: (key) => key })
+  assert.equal(typeof element.props.remote.modelCatalog, 'function', 'the page receives a lazy catalog reader')
+  // Without the namespace the page reports why it cannot list models.
+  await assert.rejects(element.props.remote.modelCatalog(), /session model catalog Remote/u)
+
+  session = {
+    async modelCatalog() {
+      return {
+        ok: true,
+        value: {
+          groups: [{ id: 'qianwen-token-plan', name: 'Qianwen AI Platform', models: [{ id: 'qwen3.8-max' }] }],
+          failures: [],
+        },
+      }
+    },
+  }
+  const { options, probes } = await loadModelOptions(element.props.remote)
+  assert.deepEqual(options.map(option => option.value), ['qianwen-token-plan/qwen3.8-max'])
+  assert.deepEqual(probes, [])
+})
+
+test('the configuration page reports an unavailable form instead of crashing', () => {
+  const { exports } = loadClientBundle()
+  const { ctx, registrations } = createClientContext()
+  ctx.configForms.get = () => undefined
+  exports.apply(ctx)
+  const page = slotOf(registrations, 'plugins.bundle.config')
+  const element = page.component({ view: 'page', t: (key) => key })
+  assert.equal(element.type, 'p', 'the page falls back to a notice')
+  assert.equal(element.props.className, 'dsh-coding-hint')
+  assert.deepEqual(element.props.children, 'config.unavailable')
+})
+
+test('the configuration page lists the Host session catalog in provider order', async () => {
   const { ctx } = createClientContext()
-  const options = await loadModelOptions(ctx.remote.llm)
+  const { options, probes } = await loadModelOptions(ctx.remote.session)
   assert.deepEqual(options.map(option => option.value), [
-    'deepseek-account/deepseek-flash',
     'deepseek-account/deepseek-v4-pro',
-  ], 'the catalog is sorted by provider, then by label')
-  assert.deepEqual(options[1], {
+    'deepseek-account/deepseek-flash',
+    'qianwen-token-plan/qwen3.8-max',
+    'qianwen-token-plan/qwen3.8-flash',
+  ], 'options keep the catalog provider order')
+  assert.deepEqual(options[0], {
     value: 'deepseek-account/deepseek-v4-pro',
     provider: 'deepseek-account',
     model: 'deepseek-v4-pro',
     label: 'DeepSeek Account · V4 Pro',
   })
-  assert.equal(options[0].label, 'DeepSeek Account · deepseek-flash', 'an unnamed model falls back to its id')
+  assert.equal(options[1].label, 'DeepSeek Account · deepseek-flash', 'an unnamed model falls back to its id')
+  assert.equal(options[2].label, 'Qianwen AI Platform · Qwen 3.8 Max', 'a third-party provider keeps its display name')
+  assert.deepEqual(probes, [])
 
   assert.deepEqual(DEFAULT_DRAFT, {
     defaultMode: 'auto',
-    plannerWorkerModel: 'deepseek-account/deepseek-v4-pro',
-    implementWorkerModel: 'deepseek-account/deepseek-flash',
-    verifyWorkerModel: 'deepseek-account/deepseek-flash',
+    plannerWorkerModel: 'auto',
+    implementWorkerModel: 'auto',
+    verifyWorkerModel: 'auto',
     language: 'auto',
     reasoning: 'auto',
   })
-  assert.equal(draftModelsValid(DEFAULT_DRAFT, options), true, 'the shipped routes are selectable')
-  assert.equal(draftModelsValid({ ...DEFAULT_DRAFT, plannerWorkerModel: 'deepseek-account/deepseek-chat' }, options), false)
-  assert.equal(draftModelsValid({ ...DEFAULT_DRAFT, verifyWorkerModel: '  ' }, options), false)
-  assert.equal(draftModelsValid(DEFAULT_DRAFT, []), false, 'an unloaded catalog never validates a route')
+  assert.equal(draftIsValid(DEFAULT_DRAFT), true, 'auto never needs the catalog')
+  assert.equal(
+    draftIsValid({ ...DEFAULT_DRAFT, plannerWorkerModel: 'deepseek-account/deepseek-chat' }),
+    true,
+    'an explicit route only has to be well formed',
+  )
+  assert.equal(draftIsValid({ ...DEFAULT_DRAFT, verifyWorkerModel: '  ' }), false, 'auto is exact: blank is still invalid')
+  assert.equal(draftIsValid(DEFAULT_DRAFT), true, 'auto is valid before any catalog loads')
+  assert.equal(
+    draftIsValid({ ...DEFAULT_DRAFT, implementWorkerModel: 'deepseek-account/deepseek-flash' }),
+    true,
+    'a typed route is saveable even before the catalog loads',
+  )
 
   const merged = mergeCurrentModels(options, ['deepseek-account/deepseek-chat'])
-  assert.equal(merged.length, 3)
+  assert.equal(merged.length, 5)
   assert.deepEqual(merged.at(-1), {
     value: 'deepseek-account/deepseek-chat',
     provider: 'deepseek-account',
@@ -258,42 +327,86 @@ test('the configuration page loads selectable models from the Host Remote', asyn
     label: 'deepseek-account/deepseek-chat',
     missing: true,
   }, 'a stored route outside the catalog is kept and flagged')
-  assert.equal(mergeCurrentModels(options, ['deepseek-account/deepseek-flash']).length, 2, 'a known route is not duplicated')
+  assert.equal(mergeCurrentModels(options, ['deepseek-account/deepseek-flash']).length, 4, 'a known route is not duplicated')
+  assert.equal(mergeCurrentModels(options, ['auto']).length, 4, 'auto is not a missing route')
 
-  await assert.rejects(loadModelOptions(undefined), /model Remote/u)
-  await assert.rejects(loadModelOptions({}), /model Remote/u)
+  assert.equal(routeInCatalog('auto', []), true, 'auto is never a catalog question')
+  assert.equal(routeInCatalog('qianwen-token-plan/qwen3.8-flash', []), false, 'a route outside the catalog only loses its hint')
+  assert.equal(routeInCatalog('deepseek-account/deepseek-flash', options), true)
 
-  const unreachable = {
-    async listProviders() { return { ok: false, error: { message: 'registry offline' } } },
-    async listConfigurableProviders() { return { ok: true, value: [] } },
-    async discoverModels() { return { ok: true, value: [] } },
+  await assert.rejects(loadModelOptions(undefined), /model catalog Remote/u)
+  await assert.rejects(loadModelOptions({}), /model catalog Remote/u)
+
+  const offline = {
+    async modelCatalog() { return { ok: false, error: { message: 'catalog offline' } } },
   }
-  await assert.rejects(loadModelOptions(unreachable), /registry offline/u)
+  await assert.rejects(loadModelOptions(offline), /catalog offline/u)
 
-  const broken = {
-    async listProviders() { return { ok: true, value: [{ id: 'deepseek-official' }] } },
-    async listConfigurableProviders() {
-      return { ok: true, value: [{ provider: 'deepseek-official', settingsNs: 'llm-deepseek' }] }
+  const empty = {
+    async modelCatalog() {
+      return {
+        ok: true,
+        value: { groups: [], failures: [{ id: 'qianwen-token-plan', name: 'Qianwen AI Platform', message: 'provider unreachable' }] },
+      }
     },
-    async discoverModels() { return { ok: false, error: { message: 'no models' } } },
   }
-  await assert.rejects(loadModelOptions(broken), /no models/u)
+  await assert.rejects(loadModelOptions(empty), /provider unreachable/u)
+
+  const silent = { async modelCatalog() { return { ok: true, value: { groups: [], failures: [] } } } }
+  await assert.rejects(loadModelOptions(silent), /advertised no models/u)
 })
 
-test('the catalog falls back to the built-in account models when discovery is absent', async () => {
-  const noDiscovery = {
-    async listProviders() { return { ok: true, value: [{ id: 'deepseek-account' }] } },
-    async listConfigurableProviders() {
-      return { ok: true, value: [{ provider: 'deepseek-account', displayName: 'DeepSeek Account', settingsNs: 'llm-deepseek' }] }
+test('a statically declared third-party provider is listed from the session catalog', async () => {
+  // The bug this covers: a provider declared statically in a bundle's patch
+  // config (qianwen-token-plan below) has no settings profile, so model
+  // discovery cannot enumerate it; the Host session catalog still lists it
+  // because the adapter advertises its configured models through listModels.
+  const remote = {
+    async modelCatalog() {
+      return {
+        ok: true,
+        value: {
+          groups: [{
+            id: 'qianwen-token-plan',
+            name: 'Qianwen AI Platform',
+            models: [
+              { id: 'deepseek-v4.1-flash-1017' },
+              { id: 'deepseek-v4-pro-0813' },
+              { id: 'qwen3.8-max', name: 'Qwen 3.8 Max' },
+              { id: 'qwen3.8-flash' },
+            ],
+          }],
+          failures: [],
+        },
+      }
     },
-    async discoverModels() { throw new Error('no model discovery is registered for "llm-deepseek"') },
   }
-  const options = await loadModelOptions(noDiscovery)
-  assert.deepEqual(options.map(option => option.value).sort(), [
-    'deepseek-account/deepseek-flash',
-    'deepseek-account/deepseek-v4-pro',
-  ])
-  assert.equal(draftModelsValid(DEFAULT_DRAFT, options), true)
+  const { options, probes } = await loadModelOptions(remote)
+  assert.deepEqual(options.map(option => option.value), [
+    'qianwen-token-plan/deepseek-v4.1-flash-1017',
+    'qianwen-token-plan/deepseek-v4-pro-0813',
+    'qianwen-token-plan/qwen3.8-max',
+    'qianwen-token-plan/qwen3.8-flash',
+  ], 'the third-party provider models are visible')
+  assert.equal(options[2].label, 'Qianwen AI Platform · Qwen 3.8 Max')
+  assert.deepEqual(probes, [])
+})
+
+test('a provider the Host cannot list keeps its reason for the diagnostic line', async () => {
+  const remote = {
+    async modelCatalog() {
+      return {
+        ok: true,
+        value: {
+          groups: [{ id: 'deepseek-account', name: 'DeepSeek Account', models: [{ id: 'deepseek-flash' }] }],
+          failures: [{ id: 'qianwen-token-plan', name: 'Qianwen AI Platform', message: 'endpoint unreachable' }],
+        },
+      }
+    },
+  }
+  const { options, probes } = await loadModelOptions(remote)
+  assert.deepEqual(options.map(option => option.value), ['deepseek-account/deepseek-flash'])
+  assert.deepEqual(probes, [{ provider: 'qianwen-token-plan', error: 'endpoint unreachable' }])
 })
 
 test('the stylesheet uses only shipped DSH classes, tokens, and sizes', async () => {
@@ -592,4 +705,13 @@ test('the configuration operations keep the revision fence and trim routes', () 
   )
 
   assert.equal(draftIsValid(draftOf({ implementWorkerModel: 'x', verifyWorkerModel: 'a/b' })), false)
+
+  const autoOps = buildConfigOps({ ...DEFAULT_DRAFT }, {})
+  assert.deepEqual(autoOps, [
+    { op: 'set', path: ['defaultMode'], value: 'auto' },
+    { op: 'set', path: ['implementWorkerModel'], value: 'auto' },
+    { op: 'set', path: ['plannerWorkerModel'], value: 'auto' },
+    { op: 'set', path: ['verifyWorkerModel'], value: 'auto' },
+  ], 'auto is saved verbatim; language and reasoning need a Host that declares them')
+  assert.equal(draftIsValid({ ...DEFAULT_DRAFT }), true, 'auto is a valid draft value')
 })

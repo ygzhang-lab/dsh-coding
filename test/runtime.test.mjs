@@ -62,7 +62,7 @@ async function createHarness(options = {}) {
   const ctx = {
     logger: { info() {}, warn() {}, debug() {} },
     fs: options.fs === null ? undefined : options.fs ?? fsService,
-    dshCodingRuntime: { options: { ...CONFIG } },
+    dshCodingRuntime: { options: { ...CONFIG, ...(options.config ?? {}) } },
     subagents: {
       getProvider: () => ({ capabilities: { agentOptions: true, agentPreset: true, outputSchema: true } }),
       startActivation: async (spec) => {
@@ -472,6 +472,84 @@ test('delegation requires the implement stage and reports the configured route',
   // The reported edit satisfies the verify gate.
   const verify = await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
   assert.equal(verify.ok, true)
+})
+
+test('an auto worker route follows the lead model at dispatch', async () => {
+  const harness = await createHarness({ config: { implementWorkerModel: 'auto' } })
+  const agent = makeAgent(process.cwd(), harness)
+  agent.model = { current: () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }) }
+  harness.ctx.llm.listProviders = () => [{ id: 'deepseek-official' }]
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+
+  const result = await harness.callTool(TOOL.implement, { task: 'fix the flag' }, agent)
+  assert.equal(result.ok, true)
+  const spec = harness.activations.at(-1)
+  assert.deepEqual(spec.agentOptions, { provider: 'deepseek-official', model: 'deepseek-flash' },
+    'auto resolves to the lead route, not to a fixed default')
+  assert.equal(spec.agentPreset, 'dsh-coding-implement')
+})
+
+test('an auto worker route refuses the dispatch when the lead model is unreadable', async () => {
+  const harness = await createHarness({ config: { implementWorkerModel: 'auto' } })
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+
+  await assert.rejects(
+    () => harness.callTool(TOOL.implement, { task: 'fix it' }, agent),
+    (error) => {
+      assert.match(error.message, /is "auto"/u)
+      assert.match(error.message, /lead's current model/u)
+      assert.match(error.message, /no other route is substituted/u)
+      return true
+    },
+  )
+  assert.equal(harness.activations.length, 0, 'the dispatch is refused before any worker starts')
+
+  agent.model = { current: () => { throw new Error('no selection yet') } }
+  await assert.rejects(
+    () => harness.callTool(TOOL.implement, { task: 'fix it' }, agent),
+    /no selection yet/u,
+    'the reason the lead route is unreadable reaches the model',
+  )
+  assert.equal(harness.activations.length, 0)
+})
+
+test('planner auto counts as the lead being the planner', async () => {
+  const harness = await createHarness({ config: { plannerWorkerModel: 'auto' } })
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlanOf(harness, agent, ['a', 'b', 'c', 'd'])
+
+  // makeAgent carries no model at all: auto must short-circuit before any read.
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(advanced.ok, true)
+  assert.equal(advanced.checkpoint.planner, undefined, 'skipping the gate is not a planner attempt')
+  assert.equal(harness.activations.length, 0)
+
+  // A throwing selection must be just as harmless.
+  const other = await createHarness({ config: { plannerWorkerModel: 'auto' } })
+  const lead = makeAgent(process.cwd(), other)
+  lead.model = { current: () => { throw new Error('no selection yet') } }
+  await created(other, lead)
+  await reachPlan(other, lead)
+  writePlanOf(other, lead, ['a', 'b', 'c', 'd'])
+  const again = await other.callTool(TOOL.stage, { stage: 'implement' }, lead)
+  assert.equal(again.ok, true, 'auto never reads the model, so it cannot throw')
+})
+
+test('all-auto worker routes mount without an agent context', async () => {
+  const harness = await createHarness({
+    config: { implementWorkerModel: 'auto', verifyWorkerModel: 'auto', plannerWorkerModel: 'auto' },
+  })
+  assert.equal(harness.ctx.dshCodingRuntime.options.plannerWorkerModel, 'auto',
+    'createHarness mounts the preset during construction; reaching this line means preflight accepted auto')
 })
 
 test('an unusable worker model fails the dispatch without starting a worker', async () => {

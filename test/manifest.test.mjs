@@ -73,11 +73,10 @@ test('the patch declares the Coding preset and four explicit worker presets', as
   assert.equal(settings.name, 'dsh-coding')
   assert.equal(settings.config.defaultMode, 'auto')
   assert.equal(settings.config.reasoning, 'auto')
-  assert.match(settings.config.implementWorkerModel, /^[^/\s]+\/[^/\s]+$/)
-  assert.match(settings.config.plannerWorkerModel, /^[^/\s]+\/[^/\s]+$/)
-  assert.equal(settings.config.plannerWorkerModel, 'deepseek-account/deepseek-v4-pro')
+  assert.equal(settings.config.implementWorkerModel, 'auto', 'workers follow the lead model out of the box')
+  assert.equal(settings.config.plannerWorkerModel, 'auto')
+  assert.equal(settings.config.verifyWorkerModel, 'auto')
   assert.equal(settings.config.requirePlanner, 'complex', 'the codex planner gate ships switched on')
-  assert.match(settings.config.verifyWorkerModel, /^[^/\s]+\/[^/\s]+$/)
 
   const coding = rows[1].config
   assert.equal(coding.id, 'dsh-coding')
