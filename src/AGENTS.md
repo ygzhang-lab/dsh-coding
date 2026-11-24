@@ -10,6 +10,7 @@ src/
   index.ts            Host 设置服务（ctx.dshCodingRuntime）
   config.ts           Config（Schemastery）、configSchema、路由解析
   models.ts           worker 模型路由：resolveWorkerRoute / assertWorkerModel / WorkerModelError
+  worker-auto.ts      worker 模型字段的 auto 哨兵（宿主 + 浏览器共用）
   handoff.ts          跨阶段交接与交付记录：合并去重、摘要渲染、worker 分片、checkpoint 校验（纯函数，浏览器可用）
   memory.ts           任务交接文档：文件名、Markdown 组装、经 fs 服务写盘（Host-only）
   stages.ts           阶段/模式常量、工具分类、阶段准入、checkpoint 类型（宿主+浏览器共用）
@@ -60,6 +61,7 @@ src/
 | 推理等级写入                 | `agent/inbox/claimed` 在 Host 快照前同步；`agent.model.select()` 只对下一步生效                                         | `dsh-agent/src/model-selection.js`             |
 | `ctx.fs` 写入                | `resolve(path,{cwd,signal})` → `{targetKey,displayPath}`；`writeText(target, content, expected, signal, sandboxPolicy)`；`expected` 用 `{kind:'createIfAbsent'}`；写入内部 `mkdir(dirname,{recursive:true})`。 | app.asar 内 DSH fs 服务源码（writeFileAtomic） |
 | 命令处理器                   | 返回 Promise，结果形状为 `{kind, text?}`（`kind` 取 `success` 或 `error`），经 `command/run`、`command/done` 持久记录 | `dsh-commands`、`dsh-command-compact`          |
+| Host 模型目录                | `remote.session.modelCatalog()` → `{ groups, failures }`；由 `ctx.llm.listModels` 对每个注册 provider 构建，静态声明在 patch config 的第三方 provider 也在其中（无需 settingsNs） | `dsh-api-session-controller/src/index.ts`、`src/catalog.ts` |
 
 ## 2. 实现约束（改代码时不要破坏）
 
@@ -69,7 +71,7 @@ src/
 4. **子代理白名单写在预设组合里**：不要假设“子代理会继承父级限制”，也不要试图通过 `agentOptions` 传工具（契约没有该字段）。
 5. **不新增自定义 Session 事件类型**；需要新状态就放进 `tool/result.meta` 的整值 checkpoint，或走 `ctx.sessionProjections`。
 6. **所有监听与注册都走 `ctx.effect`**：`ctx.on`、`ctx.tools.register`、`ctx.tools.guard`、客户端 `locale`/Definition 注册全部包在 `ctx.effect` 里。
-7. **worker 路由缺失必须失败**：不要在代码里写“回退到主代理模型”的兜底。
+7. **`auto` 是显式 opt-in 的跟随**：`auto` 只在派发时由 `resolveWorkerRoute` 解析为主代理当前模型，解析结果仍过 `assertWorkerModel`；读不到就失败，不得静默替换路由；`preflight` 在挂载期跳过 `auto`。
 8. **浏览器半只管渲染与控制回流**：不写 DOM、不加载其他 DSH Client 包；控制动作走 `/coding` 命令或官方 Remote，前端不直接改 Host 状态。预设可见性过滤放在 Host 端 `installWorkerPresetFilter`。
 9. **胶囊只能读整值 checkpoint**：`asCheckpoint()` 必须继续做全字段校验，`meta` 是历史版本写下的任意 JSON。
 10. **配置页依赖 volatile 字段**：字段改回普通字段会让插件页面上的表单消失，同时要保留 `ctx.settings.configure({ auto: false })`，否则会出现重复的自动页面。
@@ -77,7 +79,7 @@ src/
 12. **worker 预设只从对外花名册里隐藏**：过滤发生在 Host，注册表必须继续包含全部 worker 预设（planner / implement / verify 与 `dsh-coding-verify-instructions`），否则 `delegate_*` 找不到组合；不要为此改 `cordis.patch.yml` 的预设声明。
 13. **turn 快照与卡片字段一一对应**：`turn/end` 冻结的字段必须是卡片渲染的全部动态值（mode/stage/verification/planItems/openPlanItems/edits）；卡片不得直接读实时 plan/edits。
 14. **`handoff` 必须有界**：所有新增字段都要走 `HANDOFF_*` 上限并随 checkpoint 持久化；不得把无界的对话历史塞进 worker 提示词。
-15. **模型路由只走 `resolveWorkerRoute` / `assertWorkerModel`**：不得新增“回退主代理模型”的分支，也不要在别处另写一套 route 解析。
+15. **模型路由只走 `resolveWorkerRoute` / `assertWorkerModel`**：不得新增“回退主代理模型”的分支，也不要在别处另写一套 route 解析。`auto` 的解析只发生在 `models.ts` 的 `resolveWorkerRoute`；`preflight` 只做哨兵跳过，不新增并行解析。
 16. **验证失败记账只走 `recordVerification`**：不得绕过预算直接写 `state.verification`，否则阻塞出口会失效。
 17. **阻塞交付的放行只由 `checkAdvance` 的 `blocked` 返回决定**：不要用 `deny` / `ask` 实现它——那是工具门禁的语义。
 18. **验证命令必须受 `verificationTimeoutMs` 约束**：新增执行路径不得绕过 `executeVerification`，否则超时与预算都会失效。
@@ -86,7 +88,7 @@ src/
 21. **交付记录只经 handoff 持久化**：`delivered` / `followUps` 必须走 `mergeHandoff` 与 `asHandoff` 校验，并沿用现有 `HANDOFF_*` 上限；不得新增自动生成/自动写回逻辑、不得新增并行的交付摘要事件或投影字段；`WORKER_SECTIONS` 只给 `plan` 与 `implement` 加 `delivered`，`verify` 分片保持原样。
 22. **任务交接文档只经 `/coding memory` 写入**：浏览器半只发命令，不写文件、不用 `window.confirm`；Host 只走 fs 服务（`resolve` + `writeText {kind:'createIfAbsent'}`），不得用 `node:fs` 直写、不得执行 shell；文档内容只取状态机与 `coding_handoff`，不回读对话正文、不新增 Session 事件；文件名固定为 `<清洗后的 sessionId>-<UTC YYYYMMDD-HHmmss>.md`，不得覆盖已有文件。
 23. **worker 的仓库指令只由预设组合提供**：implement 预设固定含 `agent-instructions`（`maxBytes: 65536`）；verify 仅在 codex 且 `taskCount >= 2 || changedFiles >= 3` 时改用 `dsh-coding-verify-instructions`，其余情况用 `dsh-coding-verify`。不得把 AGENTS.md 文本缓存进 handoff、worker 提示词或状态（checkpoint），也不要让 worker 再手动读一遍；时效性交给 `agent-instructions`——每次派发都是新子会话、启动时读取，运行中的更新由上游在 `read` / `write` / `edit` 触碰指令文件时对账。
-24. **planner 门禁**：`requirePlanner: complex` 时，codex 下任务单严格大于三条（`PLANNER_TODO_THRESHOLD = 3`）且本会话未派发过 `delegate_plan`（成功或失败都算）就拒绝 `implement`，reason 要求先在 plan 阶段派发；主 Agent 模型与 `plannerWorkerModel` 全等（由 `preset.ts` 的 `leadIsPlanner` 判定，读不到或抛错按“不是”）时跳过；`planner` 只随整值 checkpoint 持久化，不新增 Session 事件；`delegate_plan` 一进入就记 `outcome: 'failed'`、派发结束按结果改写为 `completed` / `failed`，失败同样打开门禁；不得为 planner 路由做回退；`state.ts` 保持纯函数（主 Agent 模型判定与配置读取在 `preset.ts`，作为 `checkAdvance` 的 `AdvanceOptions` 传入）。
+24. **planner 门禁**：`requirePlanner: complex` 时，codex 下任务单严格大于三条（`PLANNER_TODO_THRESHOLD = 3`）且本会话未派发过 `delegate_plan`（成功或失败都算）就拒绝 `implement`，reason 要求先在 plan 阶段派发；主 Agent 模型与 `plannerWorkerModel` 全等（由 `preset.ts` 的 `leadIsPlanner` 判定，读不到或抛错按“不是”）时跳过；planner 为 `auto` 时 `leadIsPlanner` 直接为真、门禁跳过、不读模型；显式路由仍按 provider/model 全等判定，读不到或抛错按不是；`planner` 只随整值 checkpoint 持久化，不新增 Session 事件；`delegate_plan` 一进入就记 `outcome: 'failed'`、派发结束按结果改写为 `completed` / `failed`，失败同样打开门禁；不得为 planner 路由做回退；`state.ts` 保持纯函数（主 Agent 模型判定与配置读取在 `preset.ts`，作为 `checkAdvance` 的 `AdvanceOptions` 传入）。
 
 ## 3. 调试
 
@@ -104,3 +106,4 @@ src/
 | 下一轮或重开读不到上一轮交付 | deliver 阶段是否调用过 `coding_handoff({ delivered, followUps })`；该记录只随工具结果的 checkpoint 写入，未调用时不存在（属预期，不是投影丢失）            |
 | 卡片没有生成交接文档的按钮   | 只在最新一轮、codex 模式、该轮冻结阶段为 deliver 且该轮验证通过时出现；历史轮、非 codex、验证未通过或 BLOCKED 交付不显示                                      |
 | 生成交接文档失败             | 看 /coding memory 的收据：缺 fs 服务、会话没有 cwd、或写入被拒（同名文件已存在/沙箱不允许）；修复后重试，必要时手工执行 /coding memory                        |
+| 插件页面模型下拉缺第三方模型 | 确认配置页读的是 `ctx.remote.session.modelCatalog()`；`llm.discoverModels` 只对 configurable 目录里的 provider 有效，静态声明的 provider 没有 settings profile，枚举不到模型 |

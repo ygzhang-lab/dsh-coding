@@ -1,6 +1,6 @@
 # DSH Coding 编程智能体 — 设计思路与分层结构
 
-DSH 编程智能体运行时插件，工程化任务编排机制，Codex 五段式契约层层推进，Pro 模型负责分析需求/编排任务，交由子代理隔离各项任务使用 Flash 模型干活，确保任务交付质量和 Token 价值最大化。
+DSH 编程智能体运行时插件，工程化任务编排机制，Codex 五段式契约层层推进；三个子代理默认 `auto`（跟随主代理当前模型），也可分别指定 planner / implement / verify 的模型，确保任务交付质量和 Token 价值最大化。
 
 本文说明插件为什么这样设计、由哪些层组成，以及每层的职责边界；供使用者理解行为、供维护者规划迭代。目录、构建与发布见根 [AGENTS.md](../AGENTS.md)，测试与验证见 [test/AGENTS.md](https://github.com/ygzhang-lab/dsh-coding/blob/main/test/AGENTS.md)，源码契约与实现约束见 [src/AGENTS.md](https://github.com/ygzhang-lab/dsh-coding/blob/main/src/AGENTS.md)。
 
@@ -52,14 +52,14 @@ DSH 编程智能体运行时插件，工程化任务编排机制，Codex 五段�
 | 目标阶段    | 条件                                                                                                                            |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `plan`      | 至少一次成功的只读/检查观察（`requirementsObserved > 0`）；codex 模式还要求 handoff 里已有 goal                                 |
-| `implement` | 存在 `todo_write` 写入的结构化任务单；codex 下任务单严格大于三条时还要求本会话已尝试过 `delegate_plan`（失败也算尝试），主 Agent 自身模型等于 `plannerWorkerModel` 或 `requirePlanner: off` 时跳过 |
+| `implement` | 存在 `todo_write` 写入的结构化任务单；codex 下任务单严格大于三条时还要求本会话已尝试过 `delegate_plan`（失败也算尝试），planner 为 `auto`（主代理自己就是 planner）、主 Agent 自身模型等于 `plannerWorkerModel` 或 `requirePlanner: off` 时跳过 |
 | `verify`    | codex 模式下有落盘编辑，且 handoff 里已有验收标准；review 模式不要求                                                            |
 | `deliver`   | codex 模式要求最近一次验证通过（预算耗尽时放行一次 BLOCKED 交付），且 handoff 里有 goal 与验收标准；review 模式要求至少跑过一次 |
 | 选工作流    | auto 模式先 `coding_mode` 选择 consult / review / codex                                                                         |
 
 回退（如 verify → implement）不受前向条件限制；模式切换后若当前阶段不属于新模式，自动回到该模式的首阶段。
 
-**planner 门禁**：只挂在 `checkAdvance` 的 `implement` 分支。条件全部成立才拒绝——`mode === 'codex'`、任务单条数严格大于 `PLANNER_TODO_THRESHOLD`（= 3）、本会话还没有 `state.planner` 记录、主 Agent 自身模型不等于 planner 路由、且 `requirePlanner` 未关闭；拒绝原因要求先在 plan 阶段调用 `delegate_plan`，且拒绝本身不写入任何尝试记录。consult / review 不开放 implement 阶段，行为不变（仍由 `stageInMode` 拒绝）。主 Agent 是否即 planner 由 `src/preset.ts` 的 `leadIsPlanner` 判定：`agent.model.current()` 的 provider 与 model 与 `plannerWorkerModel` 全等才算，读不到或抛错按“不是”处理；`src/state.ts` 只接收调用方传入的 `{ leadIsPlanner, plannerGate }` 事实，保持纯函数。
+**planner 门禁**：只挂在 `checkAdvance` 的 `implement` 分支。条件全部成立才拒绝——`mode === 'codex'`、任务单条数严格大于 `PLANNER_TODO_THRESHOLD`（= 3）、本会话还没有 `state.planner` 记录、主 Agent 自身模型不等于 planner 路由、且 `requirePlanner` 未关闭；拒绝原因要求先在 plan 阶段调用 `delegate_plan`，且拒绝本身不写入任何尝试记录。consult / review 不开放 implement 阶段，行为不变（仍由 `stageInMode` 拒绝）。主 Agent 是否即 planner 由 `src/preset.ts` 的 `leadIsPlanner` 判定：`plannerWorkerModel` 为 `auto` 时 `leadIsPlanner` 直接为真——主代理自己就是 planner，门禁跳过、不读模型选择、也不派发 planner；显式路由时比较 `agent.model.current()` 的 provider 与 model 与 `plannerWorkerModel` 全等才算，读不到或抛错按“不是”处理；`src/state.ts` 只接收调用方传入的 `{ leadIsPlanner, plannerGate }` 事实，保持纯函数。
 
 **跳阶段的代价**：拒绝后 `agent/pre-step` 返回 `{ kind: 'reject' }`，Turn 以 `blocked` 结束；被拒绝的 Step 不把消息放回 Inbox，拒绝原因会在下一步契约里重新注入，模型因此知道为什么被拦下。
 
@@ -94,11 +94,12 @@ worker 预设的插件列表（`cordis.patch.yml`）就是它们的权限清单�
 
 **模型路由与缺失处理**（`src/models.ts`）：
 
-- 路由只有一个出口：`resolveWorkerRoute(config, role)` 按角色读固定字段（`plannerWorkerModel` / `implementWorkerModel` / `verifyWorkerModel`），要求正好是 `provider/model`，返回带 `role`、字段名与渲染文本的路由。`preflight` 在挂载时对三个角色各解析一次，因此缺失或格式错误直接挂载失败；注册表可读时 provider 是否存在也在挂载时检查。
+- 路由只有一个出口：`resolveWorkerRoute(config, role, lead?)` 按角色读固定字段（`plannerWorkerModel` / `implementWorkerModel` / `verifyWorkerModel`）；字段是 `auto` 时取派发时传入的主代理路由，否则要求正好是 `provider/model`。返回值始终带具体的 `provider` / `model`（外加 `role`、字段名、渲染文本与 `auto` 标记），所以下游 `agentOptions`、checkpoint 与 `planner.route` 的形状不变。
+- `auto` 的三条语义：①只在派发时解析一次，跟随主代理（对话框）当前模型，对话框换模型后下一次派发即生效；②解析结果仍要过 `assertWorkerModel`——provider 必须已注册、模型必须在目录里，任一不满足即派发失败，绝不替换成别的路由；③planner 为 `auto` 时视为主代理自己就是 planner，`requirePlanner` 门禁跳过（见 2.1）。主代理模型读不到（`agent.model.current()` 缺失或抛错）时抛 `WorkerModelError`，错误码 `AUTO_UNAVAILABLE`，worker 不启动。
+- 显式路由仍按原语义：`preflight` 在挂载时对每个非 `auto` 的角色各解析一次，因此缺失或格式错误直接挂载失败；`auto` 在 `preflight` 里被跳过，因为挂载期还没有 agent 上下文可读主代理模型，解析只发生在派发期。注册表可读时 provider 是否存在也在挂载时检查。
 - 模型是否存在要查模型目录，而目录可能需要凭据，所以挂载阶段不判模型：目录不可用时校验延后到派发，不阻塞挂载。
 - 派发前 `assertWorkerModel(ctx, route)` 现查现用：provider 不在 `ctx.llm.listProviders()` 里抛 `WorkerModelError`（`PROVIDER_MISSING`）；`ctx.llm.resolveModelInfo` 失败抛 `MODEL_UNAVAILABLE`，并附上 `ctx.llm.listModels` 给出的该 provider 可用模型（目录不可用时列表为空）。
-- 错误文案给出配置字段名、当前路由、可用模型与修复位置，并明确「worker 永不回退主代理模型」。失败的那次派发会记进 worker 记录，修好配置后重试原调用即可；同一路由重试只会得到同样的失败。
-- 默认路由：planner 用 `deepseek-account/deepseek-v4-pro`（pro 模型），implement / verify 用 `deepseek-account/deepseek-flash`；`deepseek-account` 当前内置目录是 `deepseek-flash` 与 `deepseek-v4-pro`，默认值必须在这个集合内。
+- 错误文案给出配置字段名、当前路由、可用模型与修复位置，并明确「worker 永不回退主代理模型」；`auto` 的失败还会指出主代理模型读不到。失败的那次派发会记进 worker 记录，修好配置后重试原调用即可；同一路由重试只会得到同样的失败。
 
 **失败上报**：模型校验（`assertWorkerModel`）、`startActivation` 启动、worker 结果异常，以及 worker 跑完但没有完成，都在 `delegate` 点走同一条 `recordFailure` 通道；派发成功时 `clearFailure(state, 'delegate')` 清除。异常仍以工具错误返回给主代理，额外的一次性通知保证用户也看到原因与处理方式。
 
@@ -128,7 +129,7 @@ worker 预设的插件列表（`cordis.patch.yml`）就是它们的权限清单�
 - **数据源**：持久会话投影 `dshCodingStage`（`ctx.sessionProjections`），折叠 `agent-preset/selected`、`tool/call`、`tool/result.meta`（整值 checkpoint）、`command/run`、`turn/end`；`dshCodingReasoning` 另折叠推理等级并在 `turn/end` 冻结每轮快照。
 - **只读**：卡片与胶囊没有自定义事件处理，控制动作一律回流为 `/coding` 命令，前端不直接改 Host 状态。
 - **视觉**：样式集中在 `src/client/styles.ts`，只用 `--dsw-*` 主题 token，不自定义字体、字号与配色。
-- **配置页**（`plugins.bundle.config`）：`defaultMode` / `language` / `reasoning` 仍为下拉；三个 worker 模型字段也是下拉，选项由 `ctx.remote.llm` 的 `listProviders` + `listConfigurableProviders` + `discoverModels` 现取现拼（`provider/model` 为值，`显示名 · 模型名` 为标签，按 provider 再按标签排序），当前值不在目录里时保留一项并标注“不在当前模型列表”，字段与提示转警告色并禁用保存；目录加载失败同样只显示警告 + 重试按钮并禁用保存，不会静默写入未校验路由。**恢复默认**只回填 `defaultMode`、三个模型、`language`、`reasoning`（`DEFAULT_DRAFT`），不自动保存。页面顶部固定显示“请保持 Coding 预设全部开启状态，否则本插件无法工作。”；模型提示在无效时为警告色、有效时为普通提示色。
+- **配置页**（`plugins.bundle.config`）：`defaultMode` / `language` / `reasoning` 仍为下拉；三个 worker 模型字段也是下拉，首项固定是「自动（跟随主代理当前模型）」（值 `auto`），其余选项来自 Host 的会话模型目录 `ctx.remote.session.modelCatalog()`（`provider/model` 为值，`provider 显示名 · 模型名` 为标签，顺序沿用 Host 的 provider 分组顺序）。这份目录就是对话框模型选择器用的那一份：Host 用 `ctx.llm.listModels` 对每个已注册 provider 现取模型，所以 `cordis.patch.yml` 里静态声明、没有 settings profile 的第三方 provider（如 `qianwen-token-plan`）也在其中；旧方案逐个 `discoverModels` 枚举 provider，对这类 provider 必然拿不到模型。`catalog.failures` 显示为页面顶部诊断，空目录或 Remote 缺失时显示错误与「重新加载模型」。`auto` 不参与模型目录校验（不需要在列表里找到这一项）；手选的具体路由不在目录里时保留一项并标注“不在当前模型列表”；保存校验只看 `auto` 或合法 `provider/model` 格式。**恢复默认**只回填 `defaultMode`、三个模型（回填 `auto`）、`language`、`reasoning`（`DEFAULT_DRAFT`），不自动保存。页面顶部固定显示“请保持 Coding 预设全部开启状态，否则本插件无法工作。”；模型提示在无效时为警告色、有效时为普通提示色。
 
 ### 2.5 推理层：自动分类 + 配置固定 + 会话覆盖
 
@@ -233,7 +234,7 @@ worker 预设的插件列表（`cordis.patch.yml`）就是它们的权限清单�
 | 阶段         | 要点                                                                                                                                                                            |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | requirements | 确认目标、交付物、约束；读 AGENTS.md 与目标文件；只读；用 `coding_handoff` 记录 goal / constraints / acceptance（codex 无 goal 不能进 plan）；需求不清用 `coding_mode` 回退问答 |
-| plan         | 目标与可观察验收；若 handoff 已有 `Delivered` 段，按续接轮处理（从该记录与 follow-ups 出发，不重做上一轮）；`delegate_plan` 输出单一职责子任务，并自动并入交接记录；每个子任务写清目标、涉及文件、验收标准、不碰的范围；`todo_write` 小改单文件 1–3 步、多文件 4–6 步，严格大于三条必须先 `delegate_plan`（派发失败也算尝试；主 Agent 是 planner 路由或 `requirePlanner: off` 时豁免） |
+| plan         | 目标与可观察验收；若 handoff 已有 `Delivered` 段，按续接轮处理（从该记录与 follow-ups 出发，不重做上一轮）；`delegate_plan` 输出单一职责子任务，并自动并入交接记录；每个子任务写清目标、涉及文件、验收标准、不碰的范围；`todo_write` 小改单文件 1–3 步、多文件 4–6 步，严格大于三条必须先 `delegate_plan`（派发失败也算尝试；planner 为 `auto`、主 Agent 是 planner 路由或 `requirePlanner: off` 时豁免） |
 | implement    | 主代理不能编辑；给 worker 自包含任务并带上交接的 goal / constraints / 验收标准；报告的文件自动并入 changes；编辑数决定验证门禁                                                  |
 | verify       | 先窄后宽；先有 acceptance 才能进入；失败按预算记账，耗尽后 deliver 只能 BLOCKED；不得声称未运行的检查                                                                           |
 | deliver      | 需 goal + acceptance；结束前用 `coding_handoff({ delivered, followUps })` 写回交付记录（下一轮与重开的会话读记录，不读本轮正文）；先结论、再文件路径、再验证证据与残余风险；BLOCKED 交付只报失败证据 |
@@ -243,10 +244,10 @@ worker 预设的插件列表（`cordis.patch.yml`）就是它们的权限清单�
 | 字段                    | 必填 | 默认                               | 说明                                                    |
 | ----------------------- | ---- | ---------------------------------- | ------------------------------------------------------- |
 | `defaultMode`           | 否   | `auto`                             | 新会话初始模式                                          |
-| `plannerWorkerModel`    | 是   | `deepseek-account/deepseek-v4-pro` | `provider/model`；默认 pro 模型负责勘探与拆分任务       |
+| `plannerWorkerModel`    | 是（`auto` 或 `provider/model`） | `auto` | `auto` 派发时跟随主代理当前模型；也可填一条 pro 路由负责勘探与拆分任务 |
 | `requirePlanner`        | 否   | `complex`                          | `complex` / `off`；`complex` 时 codex 任务单严格大于三条必须先 `delegate_plan`，`off` 关闭该门禁。非 volatile，只能在插件包配置里改 |
-| `implementWorkerModel`  | 是   | —                                  | `provider/model`                                        |
-| `verifyWorkerModel`     | 是   | —                                  | `provider/model`                                        |
+| `implementWorkerModel`  | 是（`auto` 或 `provider/model`） | `auto` | `auto` 派发时跟随主代理当前模型；也可填 `provider/model` |
+| `verifyWorkerModel`     | 是（`auto` 或 `provider/model`） | `auto` | `auto` 派发时跟随主代理当前模型；也可填 `provider/model` |
 | `language`              | 否   | `auto`                             | `auto` 跟随 DSH 界面 → 系统语言 → 宿主 locale           |
 | `reasoning`             | 否   | `auto`                             | `auto` 每轮分类；`low`/`high`/`max` 固定所有轮次        |
 | `maxVerifyAttempts`     | 否   | `5`                                | 允许的失败验证次数；`0` 不限制；耗尽后放行 BLOCKED 交付 |
@@ -254,7 +255,7 @@ worker 预设的插件列表（`cordis.patch.yml`）就是它们的权限清单�
 | `verificationTimeoutMs` | 否   | `360000`                           | 单次验证命令超时（ms），`0` 不限制；超时记为失败        |
 | `verificationCommands`  | 否   | `{}`                               | 按 `kind` 或 `kind:scope` 覆盖自动探测的命令            |
 
-worker 路由分三步校验：Host 设置行要求必填且格式为 `provider/model`，预设插件挂载时再解析一次（注册表可读时也检查 provider），派发前用 `assertWorkerModel` 校验模型可用性。任何一步失败都不会回退主代理模型。`requirePlanner` 与两个预算键是普通字段，只能在插件包配置里改。
+worker 路由只有两种取值：`auto` 或显式 `provider/model`。`auto` 在 Host 设置行与 `preflight` 里都只做哨兵识别——挂载期没有 agent 上下文，不解析主代理模型——只在派发时由 `resolveWorkerRoute` 解析为主代理当前模型；解析结果仍过 `assertWorkerModel`（provider 注册 + 模型目录），主代理模型读不到抛 `AUTO_UNAVAILABLE`，provider 缺失或模型不可用同样失败，任何一步失败都不会回退或替换成别的路由。显式 `provider/model` 走原语义：Host 设置行要求格式正确，`preflight` 挂载时解析并检查 provider，派发前再校验模型可用性。`requirePlanner` 与两个预算键是普通字段，只能在插件包配置里改。
 
 ## 5. 已知限制
 

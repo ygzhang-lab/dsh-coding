@@ -21,7 +21,7 @@
 3. 子代理白名单只写在预设组合里，不继承父级限制，也不经 `agentOptions` 传递。详见 src/AGENTS.md 约束 4。
 4. 不新增自定义 Session 事件类型；新状态放进整值 checkpoint 或 `ctx.sessionProjections`。详见 src/AGENTS.md 约束 5。
 5. 所有监听与注册（含客户端 `locale`/Definition）都包在 `ctx.effect` 里。详见 src/AGENTS.md 约束 6。
-6. worker 路由缺失必须失败，不得回退主代理模型。详见 src/AGENTS.md 约束 7。
+6. worker 路由只能是 `auto` 或显式 `provider/model`：`auto` 在派发时解析为主代理当前模型且仍过 `assertWorkerModel`；解析失败即派发失败，不得静默回退或替换成别的路由。详见 src/AGENTS.md 约束 7。
 
 ## 1. 环境与命令
 
