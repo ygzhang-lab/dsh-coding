@@ -4,6 +4,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { STAGE_CONTRACT } from '../lib/core/contract.js'
 import {
   IMPLEMENT_TABLE,
   STAGES_BY_MODE,
@@ -17,15 +18,15 @@ import {
   stageAdmits,
   stageInMode,
   toolClass,
-} from '../lib/stages.js'
-import { makeFailure } from '../lib/failures.js'
+} from '../lib/core/stages.js'
+import { makeFailure } from '../lib/core/failures.js'
 import {
   HANDOFF_ITEMS_LIMIT,
   asHandoff,
   handoffDigest,
   handoffForWorker,
   mergeHandoff,
-} from '../lib/handoff.js'
+} from '../lib/core/handoff.js'
 import {
   applyMode,
   applyStage,
@@ -41,7 +42,7 @@ import {
   stageToolTable,
   statusLine,
   tableTrim,
-} from '../lib/state.js'
+} from '../lib/core/state.js'
 
 /** A fresh session state in one mode. */
 function state(mode = 'codex') {
@@ -264,6 +265,8 @@ test('deliver is refused while the last verification failed', () => {
   const refused = checkAdvance(current, 'deliver')
   assert.equal(refused.ok, false)
   assert.match(refused.reason, /verification has not passed/)
+  // The refusal carries a copyable recovery call, not only the condition.
+  assert.match(refused.reason, /run_verification\(\{ kind: 'test', scope: 'package' \}\)/)
 
   current.verification = { ...current.verification, passed: true, exitCode: 0, failedTests: [], errors: [] }
   assert.equal(checkAdvance(current, 'deliver').ok, true)
@@ -274,6 +277,48 @@ test('consult mode has no implement or verify stage', () => {
   assert.equal(checkAdvance(current, 'implement').ok, false)
   assert.equal(checkAdvance(current, 'verify').ok, false)
   assert.equal(stageInMode('consult', 'deliver'), true)
+})
+
+test('review mode refuses delivery until a verification is recorded', () => {
+  const current = state('review')
+  assert.equal(current.mode, 'review')
+  // A fresh review state has not run a check: deliver reports nothing yet.
+  assert.equal(current.verification, undefined)
+  const refused = checkAdvance(current, 'deliver')
+  assert.equal(refused.ok, false)
+  assert.ok(refused.reason.startsWith('review mode delivers findings'), refused.reason)
+  assert.match(refused.reason, /run_verification\(\{ kind: 'test', scope: 'package' \}\)/)
+
+  // Any recorded outcome is the evidence review delivers from.
+  current.verification = outcome()
+  assert.equal(checkAdvance(current, 'deliver').ok, true)
+})
+
+test('the verify contract points at run_verification and rules out shell evidence', () => {
+  const verify = STAGE_CONTRACT.verify
+  assert.ok(verify.includes('run_verification'), 'the verify contract names the tool')
+  assert.ok(
+    verify.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'the verify contract spells out one copyable call',
+  )
+  assert.match(verify, /shell/i, 'the verify contract says what the shell is for')
+  assert.match(verify, /do not count|evidence/i, 'the verify contract rules the shell out of the evidence')
+})
+
+test('the implement contract asks for doc updates when public behavior changes', () => {
+  const implement = STAGE_CONTRACT.implement
+  assert.match(implement, /public behavior/i, '实现契约要说明何时需要更新文档')
+  assert.match(implement, /docs/i, '实现契约要点明文档位置')
+  assert.match(implement, /internal refactors?/i, '实现契约要说明内部重构与只改测试不需要')
+})
+
+test('the plan contract splits work larger than ten sub-tasks into rounds', () => {
+  const plan = STAGE_CONTRACT.plan
+  assert.match(plan, /ten sub-tasks/i, '规划契约要给出拆轮的规模阈值')
+  assert.match(plan, /rounds/i, '规划契约要点明按轮执行')
+  assert.match(plan, /coding_handoff/, '规划契约要把剩余轮次写进交接记录')
+  assert.match(plan, /\/coding memory open/, '规划契约要说明下一轮如何接手')
+  assert.match(plan, /\beight\b/i, '规划契约要提醒 handoff 任务清单上限')
 })
 
 test('a refused advance is recorded once and cleared once', () => {
@@ -705,6 +750,7 @@ test('resetVerification keeps the last outcome but clears the budget', () => {
   const refused = checkAdvance(current, 'deliver')
   assert.equal(refused.ok, false)
   assert.match(refused.reason, /verification has not passed/)
+  assert.match(refused.reason, /run_verification\(\{ kind: 'test', scope: 'package' \}\)/)
 })
 
 test('checkpoint carries the handoff and the retry budget', () => {

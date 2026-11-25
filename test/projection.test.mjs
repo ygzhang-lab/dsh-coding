@@ -12,7 +12,7 @@ import {
   initialView,
   isCodingSession,
   parseView,
-} from '../lib/coding-projection.js'
+} from '../lib/projections/coding-projection.js'
 
 /** One whole-value checkpoint as a Coding tool attaches it to `tool/result.meta`. */
 function checkpoint(turn, overrides = {}) {

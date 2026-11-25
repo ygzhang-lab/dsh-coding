@@ -18,7 +18,7 @@
  * （项目级 12 章 → 3 批，模块级 10 章 → 3 批，`-update` 只按受影响章节批次数调用）；任一批失败
  * 立即整体失败且零写盘，回执 reason 以「第 N/M 批：」开头。
  *
- * 断言对象是构建产物（`lib/lib/*.js`、`lib/commands/*.js`），不是 `src/` 源码。
+ * 断言对象是构建产物（`lib/docgen/*.js`、`lib/commands/*.js`），不是 `src/` 源码。
  * 所有涉及文件的用例只在 `mkdtemp` 出的临时目录里建 fixture，测试结束即递归删除；
  * git 一律注入 fake `GitRunner` 或 `getChangedFiles`，不调用真实 git，也不联网。
  */
@@ -28,14 +28,14 @@ import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { GitError, getChangedFiles } from '../lib/lib/git.js'
+import { GitError, getChangedFiles } from '../lib/docgen/git.js'
 import {
   detectPackageManager,
   getFilesModifiedSince,
   listSourceFiles,
   matchGlob,
   scanProject,
-} from '../lib/lib/project-scan.js'
+} from '../lib/docgen/project-scan.js'
 import {
   BATCH_MAX_SECTIONS,
   MAX_DOC_LINES,
@@ -62,15 +62,15 @@ import {
   sectionBody,
   splitSections,
   truncateToMaxLines,
-} from '../lib/lib/agents-doc.js'
+} from '../lib/docgen/agents-doc.js'
 import {
   DOC_CONTEXT_EXCERPT_CHARS,
   DOC_CONTEXT_TOTAL_LIMIT,
   DOC_CONTEXT_TRUNCATED_MARK,
   buildDocPrompt,
   excerptOf,
-} from '../lib/lib/doc-context.js'
-import { generateDoc } from '../lib/lib/doc-model.js'
+} from '../lib/docgen/doc-context.js'
+import { generateDoc } from '../lib/docgen/doc-model.js'
 import {
   branchFor,
   createCodingInitHandler,
@@ -1589,6 +1589,11 @@ test('buildDocPrompt：project-create 组装草稿、摘录与章节表', async 
   assert.ok(prompt.system.includes('占位符'), 'system 应禁止写占位符')
   assert.ok(prompt.system.includes('模块索引'), 'system 应说明模块索引由插件回写')
 
+  assert.ok(prompt.system.includes('书写风格'), 'system 应带固定的书写风格规则')
+  for (const keyword of ['接手', '先说', '说人话', '理由或后果', '建议考虑', '原文']) {
+    assert.ok(prompt.system.includes(keyword), `书写风格规则应包含「${keyword}」`)
+  }
+
   // 「TODO: 待补充」只允许出现在「禁止占位符」那一条规则里，不再要求逐字照抄章节表。
   const placeholderRule = prompt.system
     .split('\n')
@@ -2016,8 +2021,8 @@ test('generateDoc：宿主、模型、流与正文的失败都收成 ok:false', 
 
 /** 15. 约束：doc-model.ts 不 import node:fs，文档模型层不碰磁盘。 */
 test('doc-model.ts 不 import node:fs', async () => {
-  const source = await readFile(new URL('../src/lib/doc-model.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/docgen/doc-model.ts', import.meta.url), 'utf8')
 
-  assert.ok(!source.includes('node:fs'), 'src/lib/doc-model.ts 不得出现 node:fs')
-  assert.ok(!source.includes("from 'node:"), 'src/lib/doc-model.ts 不得 import 内置模块')
+  assert.ok(!source.includes('node:fs'), 'src/docgen/doc-model.ts 不得出现 node:fs')
+  assert.ok(!source.includes("from 'node:"), 'src/docgen/doc-model.ts 不得 import 内置模块')
 })

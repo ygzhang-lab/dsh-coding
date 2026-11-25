@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { asFailure, failureNotice, failureStatus, makeFailure } from '../lib/failures.js'
+import { asFailure, failureNotice, failureStatus, makeFailure } from '../lib/core/failures.js'
 
 test('a delegate failure names the point, the reason, and the next move', () => {
   const failure = makeFailure('delegate', new Error('model missing'), 'zh')
@@ -37,6 +37,23 @@ test('the reason and the action are bounded', () => {
   const long = makeFailure('command', new Error('x'.repeat(900)), 'en')
   assert.equal(long.reason.length, 600)
   assert.ok(long.action.length <= 600)
+})
+
+test('a stage failure names the run_verification example in both languages', () => {
+  const example = "run_verification({ kind: 'test', scope: 'package' })"
+  const zh = makeFailure('stage', new Error('blocked'), 'zh')
+  const en = makeFailure('stage', new Error('blocked'), 'en')
+
+  for (const failure of [zh, en]) {
+    assert.ok(failure.action.includes(example), failure.action)
+    assert.ok(failure.action.length <= 600, 'the action stays inside the failure text limit')
+  }
+  assert.match(zh.action, /[\u4e00-\u9fff]/, 'the Chinese action stays Chinese')
+  assert.doesNotMatch(en.action, /[\u4e00-\u9fff]/, 'the English action carries no CJK')
+
+  // The rendered notice keeps the copyable example, not just the report object.
+  assert.ok(failureNotice(zh, 'zh').includes(example))
+  assert.ok(failureNotice(en, 'en').includes(example))
 })
 
 test('asFailure accepts a report and rejects every malformed field', () => {

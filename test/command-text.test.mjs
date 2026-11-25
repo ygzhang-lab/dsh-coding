@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { commandText, initText } from '../lib/command-text.js'
+import { commandText, initText } from '../lib/commands/command-text.js'
 
 /** 只描述语法的 hint，两种语言必须完全一致。 */
 const HINT = 'auto | consult | review | codex | set <auto|consult|review|codex>'

@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createBackgroundRunner } from '../lib/lib/background-task.js'
+import { createBackgroundRunner } from '../lib/docgen/background-task.js'
 import { createCodingInitSubmitter } from '../lib/commands/coding-init-async.js'
 
 /** 一个可以由测试手工 settle 的 Promise，用来控制后台任务何时完成。 */

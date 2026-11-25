@@ -201,10 +201,10 @@ test('the host build keeps DSH packages external instead of vendoring them', asy
   // bundled: the profile links this package without a node_modules of its own.
   for (const [entry, dependency] of [
     ['lib/index.js', '@deepseek-ai/cordis'],
-    ['lib/config.js', '@deepseek-ai/schemastery'],
-    ['lib/apply-patch.js', '@deepseek-ai/dsh-tools'],
+    ['lib/config/config.js', '@deepseek-ai/schemastery'],
+    ['lib/tools/apply-patch.js', '@deepseek-ai/dsh-tools'],
     ['lib/preset.js', '@deepseek-ai/dsh-tools'],
-    ['lib/messages.js', '@deepseek-ai/dsh-llm'],
+    ['lib/core/messages.js', '@deepseek-ai/dsh-llm'],
   ]) {
     const code = await readFile(join(root, entry), 'utf8')
     assert.match(code, new RegExp(dependency.replace('/', '\\/')), `${entry} imports ${dependency} at runtime`)

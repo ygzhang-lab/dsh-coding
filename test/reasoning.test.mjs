@@ -15,11 +15,11 @@ import {
   levelForEffort,
   latestUserTextIn,
   mapEffort,
-} from '../lib/reasoning.js'
+} from '../lib/reasoning/reasoning.js'
 import {
   REASONING_PROJECTION_KEY,
   reasoningProjection,
-} from '../lib/reasoning-projection.js'
+} from '../lib/projections/reasoning-projection.js'
 
 function user(text) {
   return {

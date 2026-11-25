@@ -17,8 +17,8 @@ import {
   readLatestMemory,
   sessionTitleOf,
   writeMemoryDocument,
-} from '../lib/memory.js'
-import { createState } from '../lib/state.js'
+} from '../lib/commands/memory.js'
+import { createState } from '../lib/core/state.js'
 
 /** The instant every filename assertion uses: 2026-07-15T06:30:12Z. */
 const AT = Date.UTC(2026, 6, 15, 6, 30, 12)

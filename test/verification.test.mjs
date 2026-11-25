@@ -7,13 +7,13 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { configuredCommand } from '../lib/config.js'
+import { configuredCommand } from '../lib/config/config.js'
 import {
   VerificationError,
   executeVerification,
   parseFailure,
   resolveVerification,
-} from '../lib/verification.js'
+} from '../lib/tools/verification.js'
 
 const CONFIG = {
   defaultMode: 'codex',

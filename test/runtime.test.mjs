@@ -15,7 +15,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as preset from '../lib/preset.js'
-import { IMPLEMENT_TABLE, TOOL } from '../lib/stages.js'
+import { IMPLEMENT_TABLE, TOOL } from '../lib/core/stages.js'
 
 const CONFIG = {
   defaultMode: 'codex',
@@ -753,6 +753,10 @@ test('deliver: a failed verification refuses the advance and blocks the next ste
   const refused = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
   assert.equal(refused.ok, false)
   assert.match(refused.reason, /verification has not passed/)
+  assert.ok(
+    refused.reason.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'the refusal carries the copyable recovery call',
+  )
 
   const step = await harness.preStep(agent, [])
   assert.equal(step.kind, 'reject', 'skipping the gate blocks the next step')
@@ -834,6 +838,10 @@ test('/coding reset clears an exhausted retry budget', async () => {
   const refused = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
   assert.equal(refused.ok, false)
   assert.match(refused.reason, /verification has not passed/)
+  assert.ok(
+    refused.reason.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'the refusal still names the recovery call after a budget reset',
+  )
 })
 
 test('pre-step injects the stage contract instead of a global prompt', async () => {
@@ -850,6 +858,25 @@ test('pre-step injects the stage contract instead of a global prompt', async () 
   assert.equal(injected.source.form, 'notice')
   assert.match(injected.content[0].text, /dsh-coding runtime/)
   assert.match(injected.content[0].text, /### requirements/)
+
+  // The verify stage names the recovery call and says a shell check is not evidence.
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  const verifyStep = await harness.preStep(agent, [])
+  assert.equal(verifyStep.kind, 'enter')
+  const verifyInjected = verifyStep.messages.find((message) => message.source?.kind === 'dsh-coding-stage')
+  assert.ok(verifyInjected, 'the verify stage injects its own contract')
+  const verifyText = verifyInjected.content[0].text
+  assert.match(verifyText, /### verify/)
+  assert.ok(verifyText.includes('run_verification'), 'the verify contract points at run_verification')
+  assert.ok(
+    verifyText.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'the verify contract carries the copyable call',
+  )
+  assert.match(verifyText, /do not count/i, 'the verify contract refuses shell output as evidence')
 })
 
 test('a mode without the current stage resets to its entry stage', async () => {
@@ -911,6 +938,10 @@ test('/coding control verbs reach the agent as steering or follow-up', async () 
   const refused = await command.handler({ agent, rawInput: 'stage deliver' })
   assert.equal(refused.kind, 'error')
   assert.match(refused.text, /verification has not passed/)
+  assert.ok(
+    refused.text.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'the command receipt repeats the copyable recovery call',
+  )
 
   // A mode switch queues a follow-up turn.
   const switched = await command.handler({ agent, rawInput: 'review' })
@@ -1183,6 +1214,10 @@ test('a verify worker that names no command cannot satisfy the deliver gate', as
   const refused = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
   assert.equal(refused.ok, false)
   assert.match(refused.reason, /verification has not passed/)
+  assert.ok(
+    refused.reason.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'a worker report without a command still names the recovery call',
+  )
 })
 
 test('a resumed session keeps its recorded stage, plan, and verification', async () => {
@@ -1413,6 +1448,10 @@ test('a verify worker that reports failing tests cannot satisfy the deliver gate
   const refused = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
   assert.equal(refused.ok, false, 'a self-contradictory report is not evidence')
   assert.match(refused.reason, /verification has not passed/)
+  assert.ok(
+    refused.reason.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'a self-contradictory report still names the recovery call',
+  )
 })
 
 test('a complex codex verify dispatch loads the repository-instructions preset', async () => {
@@ -1673,6 +1712,10 @@ test('a new implementation invalidates an earlier verification', async () => {
   const deliver = await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
   assert.equal(deliver.ok, false)
   assert.match(deliver.reason, /verification has not passed/)
+  assert.ok(
+    deliver.reason.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    'a stale verification still names the recovery call',
+  )
 })
 
 test('an unresolvable verification command is still recorded as evidence', async () => {
@@ -2018,6 +2061,11 @@ test('阶段推进被拒时用户能看到运行中断提示', async () => {
   assert.ok(notice, '拒绝要以控制消息形式告知用户')
   assert.match(notice.content[0].text, /运行中断|runtime failure/)
   assert.match(notice.content[0].text, /阶段推进|Stage advance/)
+  assert.match(notice.content[0].text, /run_verification/)
+  assert.ok(
+    notice.content[0].text.includes("run_verification({ kind: 'test', scope: 'package' })"),
+    '通知正文带上可复制的恢复调用示例',
+  )
 
   // 条件补齐后推进成功，失败标记清除。
   writePlan(harness, agent)

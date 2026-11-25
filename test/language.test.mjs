@@ -12,8 +12,8 @@ import {
   languagePrompt,
   normalizeLanguageMode,
   resolveHostLanguage,
-} from '../lib/language.js'
-import { parseAppleLanguages } from '../lib/system-language.js'
+} from '../lib/language/language.js'
+import { parseAppleLanguages } from '../lib/language/system-language.js'
 
 test('only Chinese selects Chinese; every other tag falls back to English', () => {
   assert.equal(languageOf('zh'), 'zh')
@@ -55,9 +55,13 @@ test('the language prompt names the language and preserves code', () => {
   const zh = languagePrompt('zh')
   assert.match(zh, /中文/u)
   assert.match(zh, /代码/u)
+  assert.match(zh, /注释/u, 'the zh prompt covers code comments')
+  assert.match(zh, /提交信息/u, 'the zh prompt covers commit messages')
   const en = languagePrompt('en')
   assert.match(en, /English/u)
   assert.match(en, /file paths/u)
+  assert.match(en, /comments/i, 'the en prompt covers code comments')
+  assert.match(en, /commit messages/i, 'the en prompt covers commit messages')
 })
 
 test('the macOS language-list parser accepts both quoted and bare entries', () => {
