@@ -26,9 +26,9 @@ DSH_HOME="$H" ELECTRON_RUN_AS_NODE=1 \
 
 探针额外打印三项关键事实：`prompt context coding:language`（语言提示段）、`projection dshCodingStage`（卡片数据源是否注册）、`after agent-preset/selected`（选中 Coding 后投影是否 `active: true`）。
 
-## 本地 profile 挂载（开发用）
-
-把工作区挂进正在使用的 profile（默认 `desktop`），`link:` 直接读本仓库产物，改完不重装。**照下面三步做，不要去逆向 `app.asar` 的安装流程、不要读整个 `node_modules`、不要用真实 `desktop` profile 再起一个 Host**（会和正在运行的 App 共用同一份 profile 的存储与文件锁）。
+## 本地插件开发 profile 挂载（开发用）
+- 1.  检查 DSH 正在使用的 profile （默认 `desktop`），如果已安装 NPM 版本的 DSH Coding 插件，就先把他卸载；
+- 2.  检查 DSH 正在使用的 profile （默认 `desktop`），如果已通过 link 方式挂载此插件项目，就忽略下方的操作（无需重复挂载）。否则就把工作区挂载进正在使用的 profile（默认 `desktop`），`link:` 直接读本仓库产物，改完不重装。**照下面三步做，不要去逆向 `app.asar` 的安装流程、不要读整个 `node_modules`、不要用真实 `desktop` profile 再起一个 Host**（会和正在运行的 App 共用同一份 profile 的存储与文件锁）
 
 前置：项目侧依赖与产物就位（`lib/` 是构建产物，缺了挂上也起不来）。
 
