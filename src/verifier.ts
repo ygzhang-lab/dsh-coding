@@ -8,8 +8,8 @@
  *
  * @module dsh-coding/verifier
  */
-import { registerVerificationTool } from './verification-tool.js'
-import type { CodingConfig } from './config.js'
+import { registerVerificationTool } from './tools/verification-tool.js'
+import type { CodingConfig } from './config/config.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-coding-verifier'

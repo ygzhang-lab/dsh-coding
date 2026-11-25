@@ -9,7 +9,7 @@
  *
  * @module dsh-coding/editor
  */
-import { registerApplyPatch } from './apply-patch.js'
+import { registerApplyPatch } from './tools/apply-patch.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-coding-editor'

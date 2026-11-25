@@ -24,13 +24,13 @@ import {
   configJsonSchema,
   normalizeConfig,
   type CodingConfig,
-} from './config.js'
-import { WORKER_PRESETS } from './stages.js'
+} from './config/config.js'
+import { WORKER_PRESETS } from './core/stages.js'
 
 // `Config` carries both meanings: the Schemastery schema (value) and the
 // configuration type (interface) it validates.
-export { Config, configJsonSchema, parseWorkerRoute } from './config.js'
-export type { CodingConfig, WorkerRoute } from './config.js'
+export { Config, configJsonSchema, parseWorkerRoute } from './config/config.js'
+export type { CodingConfig, WorkerRoute } from './config/config.js'
 
 /** The same JSON Schema under the name non-Loader consumers expect. */
 export const configSchema = configJsonSchema

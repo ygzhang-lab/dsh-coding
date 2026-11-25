@@ -20,15 +20,15 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createCodingInitSubmitter } from './commands/coding-init-async.js'
 import { agentScopeOf, createCodingInitHandler, sandboxPolicyOf, serviceOf } from './commands/coding-init.js'
-import { commandText } from './command-text.js'
-import { type CodingConfig, type ReasoningMode } from './config.js'
-import { checkDocRoute, generateDoc } from './lib/doc-model.js'
-import { isWorkerAuto } from './worker-auto.js'
-import { ReasoningController } from './reasoning.js'
-import { reasoningProjection } from './reasoning-projection.js'
-import { readLatestMemory, writeMemoryDocument } from './memory.js'
-import { controlMessage, stageMessage } from './messages.js'
-import { failureNotice, makeFailure, type FailurePoint } from './failures.js'
+import { commandText } from './commands/command-text.js'
+import { type CodingConfig, type ReasoningMode } from './config/config.js'
+import { checkDocRoute, generateDoc } from './docgen/doc-model.js'
+import { isWorkerAuto } from './config/worker-auto.js'
+import { ReasoningController } from './reasoning/reasoning.js'
+import { reasoningProjection } from './projections/reasoning-projection.js'
+import { readLatestMemory, writeMemoryDocument } from './commands/memory.js'
+import { controlMessage, stageMessage } from './core/messages.js'
+import { failureNotice, makeFailure, type FailurePoint } from './core/failures.js'
 import {
   assertWorkerModel,
   describeProviders,
@@ -39,14 +39,14 @@ import {
   WORKER_ROLES,
   type ResolvedWorkerRoute,
   type WorkerRole,
-} from './models.js'
+} from './config/models.js'
 import {
   handoffDigest,
   handoffForWorker,
   mergeHandoff,
   type HandoffPatch,
   type HandoffTask,
-} from './handoff.js'
+} from './core/handoff.js'
 import {
   CODING_MODES,
   CODING_STAGES,
@@ -59,7 +59,7 @@ import {
   type CodingMode,
   type CodingStage,
   type VerificationOutcome,
-} from './stages.js'
+} from './core/stages.js'
 import {
   CodingStateStore,
   applyMode,
@@ -81,12 +81,12 @@ import {
   takeFailureNotice,
   takeLastRefusal,
   type CodingState,
-} from './state.js'
-import { stageContext } from './contract.js'
-import { registerVerificationTool } from './verification-tool.js'
-import { codingProjection, type CodingStageView } from './coding-projection.js'
-import { languagePrompt, resolveHostLanguage, type PromptLanguage } from './language.js'
-import { systemLanguages } from './system-language.js'
+} from './core/state.js'
+import { stageContext } from './core/contract.js'
+import { registerVerificationTool } from './tools/verification-tool.js'
+import { codingProjection, type CodingStageView } from './projections/coding-projection.js'
+import { languagePrompt, resolveHostLanguage, type PromptLanguage } from './language/language.js'
+import { systemLanguages } from './language/system-language.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-coding-preset'
