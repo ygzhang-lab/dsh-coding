@@ -1,18 +1,22 @@
 /**
  * 任务交接文档：把一轮 Coding 结束时的有界状态写成一篇 Markdown，落到
- * `<会话 cwd>/.agents/memory/<sessionId>-<YYYYMMDD-HHmmss>.md`。
+ * `<会话 cwd>/.agents/memory/<UTC YYYYMMDD-HHmmss>-<清洗后的会话标题>.md`。
  *
  * 文档只由状态机与 coding_handoff 记录（{@link CodingHandoff}）拼出，不回读对话正文，
  * 也不新增 Session 事件：它是本轮状态机与交接记录的存档快照，下一轮继续时仍以
  * coding_handoff 的实时记录为准。拼装部分是纯函数（{@link composeMemoryDocument}），
  * 便于单测；写盘只走注入的 fs 服务（`resolve` + `writeText`），从不使用 `node:fs`。
+ * 读取（{@link readLatestMemory}）同样只走注入的 fs 服务（`resolve` + `stat` + `listDir` +
+ * `readText`），供 `/coding memory open` 在新会话里手动接手上一篇交接文档。
  *
  * 本模块只在 Host 侧使用（依赖 `node:path`），客户端不导入它。
  *
  * @module dsh-coding/memory
  */
 import { join } from 'node:path'
+import { commandText, type CommandText } from './command-text.js'
 import type { CodingHandoff, HandoffChange, HandoffTask } from './handoff.js'
+import type { PromptLanguage } from './language.js'
 import type { CodingState, PlanItem } from './state.js'
 import type { VerificationOutcome } from './stages.js'
 
@@ -22,8 +26,8 @@ export const MEMORY_LIMIT = 20000
 /** 交接文档在项目根下的目录。 */
 export const MEMORY_DIR = join('.agents', 'memory')
 
-/** 文件名里保留的 sessionId 字符；其余一律替换成 `-`。 */
-const SAFE_ID = /[^A-Za-z0-9._-]/gu
+/** 文件名里标题部分的最大字符数（按码点计，避免切出半个代理对）。 */
+export const MEMORY_TITLE_LIMIT = 40
 
 /** 交接文档的输入：只取状态机与 handoff 的有界数据，不含 I/O 与对话正文。 */
 export interface MemoryInput {
@@ -46,14 +50,34 @@ export type MemoryWriteResult =
   | { readonly ok: true; readonly name: string; readonly displayPath: string }
   | { readonly ok: false; readonly reason: string; readonly action: string }
 
+/** 读盘结果：成功给出文件名、展示路径与正文；失败给出原因与处理办法，从不抛错。 */
+export type MemoryReadResult =
+  | { readonly ok: true; readonly name: string; readonly displayPath: string; readonly content: string }
+  | { readonly ok: false; readonly reason: string; readonly action: string }
+
 /** 注入的 fs 服务目标：本模块只需要展示路径。 */
 interface MemoryTarget {
   readonly displayPath?: string
 }
 
-/** 注入的 fs 服务：本模块只调用 `resolve` 与 `writeText`。 */
+/** `listDir` 返回的目录项：只需要名字、类型与目标。 */
+interface MemoryDirEntry {
+  readonly name: string
+  readonly type: string
+  readonly target: MemoryTarget
+}
+
+/** `stat` 返回的元信息：本模块只关心它是不是目录（或文件）。 */
+interface MemoryStatInfo {
+  readonly type?: string
+}
+
+/** 注入的 fs 服务：本模块只调用 `resolve`、`stat`、`listDir`、`readText` 与 `writeText`。 */
 interface MemoryFileSystem {
   resolve(path: string, options?: { cwd?: string; signal?: AbortSignal }): Promise<MemoryTarget>
+  stat(target: MemoryTarget, signal?: AbortSignal): Promise<MemoryStatInfo | undefined>
+  listDir(target: MemoryTarget, signal?: AbortSignal): Promise<readonly MemoryDirEntry[]>
+  readText(target: MemoryTarget, signal?: AbortSignal): Promise<string>
   writeText(
     target: MemoryTarget,
     content: string,
@@ -64,18 +88,37 @@ interface MemoryFileSystem {
 }
 
 /**
- * 生成一篇交接文档的文件名：`<清洗后的 sessionId>-<YYYYMMDD-HHmmss>.md`。
+ * 生成一篇交接文档的文件名：`<UTC YYYYMMDD-HHmmss>-<清洗后的标题>.md`。
  *
- * sessionId 只保留 `[A-Za-z0-9._-]`，其余字符换成 `-`，清洗后为空则退回 `session`；
- * 时间戳取 UTC，非法 `at` 按 epoch 处理而不抛错。
- * @param sessionId - 会话 id。
+ * 时间戳在前，`listDir` 的名字字典序即时间序，取最新一篇不需要索引文件。
+ * 标题经 {@link slugOf} 清洗，为空退回 `session`；非法 `at` 按 epoch 处理而不抛错。
+ * @param title - 会话标题（缺失时由调用方回退到 handoff 目标）。
  * @param at - 时间戳（毫秒）。
  * @returns 文件名，不含目录。
  */
-export function memoryFileName(sessionId: string, at: number): string {
-  const cleaned = sessionId.replace(SAFE_ID, '-')
-  const stem = cleaned === '' ? 'session' : cleaned
-  return `${stem}-${utcStamp(at)}.md`
+export function memoryFileName(title: string, at: number): string {
+  return `${utcStamp(at)}-${slugOf(title)}.md`
+}
+
+/**
+ * 读一段会话标题：优先 `sessionTitle` 服务的快照，服务缺失或抛错时读作空串。
+ *
+ * 调用方拿空串再回退到 handoff 的目标，因此这里不猜默认值。
+ * @param service - `sessionTitle` 服务（来自 agent 作用域或插件作用域）。
+ * @param session - 当前会话。
+ * @returns 修剪后的标题，读不到时为空串。
+ */
+export function sessionTitleOf(service: unknown, session: unknown): string {
+  const source = service as { get?: unknown } | undefined
+  const get = source?.get
+  if (typeof get !== 'function') return ''
+  try {
+    const snapshot = get.call(source, session) as { title?: unknown } | undefined
+    const title = snapshot?.title
+    return typeof title === 'string' ? title.trim() : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -128,25 +171,24 @@ export function composeMemoryDocument(input: MemoryInput): string {
  * @param ctx - 插件作用域。
  * @param agent - 触发写入的 lead agent（`agent.ctx` 的作用域优先级更高）。
  * @param state - 本轮结束时的状态机快照。
- * @param options - 取消信号。
+ * @param options - 取消信号与文案语言（缺省英文，既有收据不变）。
  * @returns 成功时给出文件名与展示路径，失败时给出原因与处理办法。
  */
 export async function writeMemoryDocument(
   ctx: any,
   agent: any,
   state: CodingState,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; language?: PromptLanguage },
 ): Promise<MemoryWriteResult> {
   const signal = options?.signal
+  const copy = commandText(options?.language ?? 'en')
   try {
     const fs: MemoryFileSystem | undefined = serviceOf(agent?.ctx, ctx, 'fs')
     if (fs === undefined) {
       return {
         ok: false,
-        reason: 'this Host does not expose the fs service',
-        action:
-          'keep the Coding preset mounted in a DSH host that provides the filesystem service, '
-          + 'then retry /coding memory',
+        reason: copy.memoryMissingFs,
+        action: copy.memoryMissingFsAction,
       }
     }
 
@@ -154,14 +196,16 @@ export async function writeMemoryDocument(
     if (typeof cwd !== 'string' || cwd === '') {
       return {
         ok: false,
-        reason: 'the session has no working directory',
-        action: 'set a working directory for this session, then retry /coding memory',
+        reason: copy.memoryMissingCwd,
+        action: copy.memoryMissingCwdAction,
       }
     }
 
     const policy = await sandboxPolicyOf(agent?.ctx, ctx, agent)
     const now = Date.now()
-    const name = memoryFileName(state.sessionId, now)
+    const title = sessionTitleOf(serviceOf(agent?.ctx, ctx, 'sessionTitle'), agent?.session)
+      || textOf(state.handoff?.goal)
+    const name = memoryFileName(title, now)
     const display = join(MEMORY_DIR, name)
     const target = await fs.resolve(display, { cwd, signal })
 
@@ -197,8 +241,97 @@ export async function writeMemoryDocument(
     return {
       ok: false,
       reason: (raw === '' ? 'unknown error' : raw).slice(0, 600),
-      action: 'fix the reported filesystem problem, then retry /coding memory',
+      action: copy.memoryWriteFailedAction,
     }
+  }
+}
+
+/**
+ * 读取最新一篇交接文档，供 `/coding memory open [关键词]` 在新会话里接手。
+ *
+ * 只走注入的 fs 服务：`resolve` 解析 `.agents/memory`，`listDir` 列出目录项，`readText`
+ * 读出正文。只认文件名形如 `<UTC YYYYMMDD-HHmmss>-<标题>.md` 的普通文件，按名字降序取
+ * 第一条（时间戳在前，名字序即时间序）；给了关键词时只保留文件名含该词（不区分大小写）的
+ * 条目。目录不存在（首次使用）按空存档处理，不当成文件系统故障。任何一步抛错都收成
+ * `{ ok:false, … }` 收据，绝不外泄异常。
+ * @param ctx - 插件作用域。
+ * @param agent - 触发读取的 lead agent（`agent.ctx` 的作用域优先级更高）。
+ * @param options - 文件名关键词（可选）、取消信号与文案语言（缺省英文）。
+ * @returns 成功时给出文件名、展示路径与正文，失败时给出原因与处理办法。
+ */
+export async function readLatestMemory(
+  ctx: any,
+  agent: any,
+  options?: { keyword?: string; signal?: AbortSignal; language?: PromptLanguage },
+): Promise<MemoryReadResult> {
+  const signal = options?.signal
+  const keyword = textOf(options?.keyword)
+  const copy = commandText(options?.language ?? 'en')
+  try {
+    const fs: MemoryFileSystem | undefined = serviceOf(agent?.ctx, ctx, 'fs')
+    if (fs === undefined) {
+      return {
+        ok: false,
+        reason: copy.memoryMissingFs,
+        action: copy.memoryMissingFsReadAction,
+      }
+    }
+
+    const cwd = agent?.session?.header?.cwd
+    if (typeof cwd !== 'string' || cwd === '') {
+      return {
+        ok: false,
+        reason: copy.memoryMissingCwd,
+        action: copy.memoryMissingCwdReadAction,
+      }
+    }
+
+    const dir = await fs.resolve(MEMORY_DIR, { cwd, signal })
+    const info = await fs.stat(dir, signal)
+    if (info === undefined) {
+      // 目录还不存在（首次使用）读作空存档，不是文件系统故障。
+      return emptyArchive(copy, keyword)
+    }
+    const entries = await fs.listDir(dir, signal)
+    const lowered = keyword.toLowerCase()
+    const docs: { readonly name: string; readonly target: MemoryTarget }[] = []
+    for (const entry of entries) {
+      if (entry?.type !== 'file') continue
+      const name = typeof entry.name === 'string' ? entry.name : ''
+      if (!/^\d{8}-\d{6}-/u.test(name) || !/\.md$/u.test(name)) continue
+      if (lowered !== '' && !name.toLowerCase().includes(lowered)) continue
+      docs.push({ name, target: entry.target })
+    }
+    docs.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
+    const latest = docs[0]
+    if (latest === undefined) {
+      return emptyArchive(copy, keyword)
+    }
+
+    const content = await fs.readText(latest.target, signal)
+    const shown = latest.target?.displayPath
+    return {
+      ok: true,
+      name: latest.name,
+      displayPath: typeof shown === 'string' && shown !== '' ? shown : join(MEMORY_DIR, latest.name),
+      content,
+    }
+  } catch (error) {
+    const raw = (error instanceof Error ? error.message : String(error)).trim()
+    return {
+      ok: false,
+      reason: (raw === '' ? 'unknown error' : raw).slice(0, 600),
+      action: copy.memoryReadFailedAction,
+    }
+  }
+}
+
+/** 空存档收据：目录不存在与目录里没有合格文档对外是同一件事。 */
+function emptyArchive(copy: CommandText, keyword: string): MemoryReadResult {
+  return {
+    ok: false,
+    reason: keyword === '' ? copy.memoryEmptyArchive : copy.memoryNoMatch(keyword),
+    action: copy.memoryEmptyArchiveAction,
   }
 }
 
@@ -244,6 +377,21 @@ async function sandboxPolicyOf(primary: any, fallback: any, agent: any): Promise
 function utcStamp(at: number): string {
   const iso = new Date(Number.isFinite(at) ? at : 0).toISOString()
   return `${iso.slice(0, 10).replace(/-/gu, '')}-${iso.slice(11, 19).replace(/:/gu, '')}`
+}
+
+/**
+ * 把会话标题清洗成文件名里的一段：Windows 非法字符与控制字符换成空格，空白与 `.` 折叠成
+ * `-`，连续 `-` 折叠，按码点截到 {@link MEMORY_TITLE_LIMIT} 个字符，仍为空则退回 `session`。
+ * @param title - 原始标题。
+ * @returns 可安全放进文件名的标题段。
+ */
+function slugOf(title: string): string {
+  const cleaned = textOf(title).replace(/[<>:"/\\|?*\u0000-\u001F\u007F]/gu, ' ')
+  const flat = cleaned.replace(/\s+/gu, ' ').trim()
+  if (flat === '') return 'session'
+  const dashed = flat.replace(/[\s.]+/gu, '-').replace(/-+/gu, '-').replace(/^-+|-+$/gu, '')
+  const sliced = Array.from(dashed).slice(0, MEMORY_TITLE_LIMIT).join('').replace(/^-+|-+$/gu, '')
+  return sliced === '' ? 'session' : sliced
 }
 
 /** 头部时间戳，ISO 8601（UTC）；非法数值按 epoch 处理。 */

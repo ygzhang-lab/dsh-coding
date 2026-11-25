@@ -31,6 +31,7 @@ export type FailurePoint =
   | 'verification'
   | 'handoff'
   | 'command'
+  | 'stage'
 
 /** Every failure point, in report order. */
 export const FAILURE_POINTS: readonly FailurePoint[] = [
@@ -42,6 +43,7 @@ export const FAILURE_POINTS: readonly FailurePoint[] = [
   'verification',
   'handoff',
   'command',
+  'stage',
 ]
 
 /** One blocking exception, reduced to what a notice and a status line need. */
@@ -65,6 +67,7 @@ const FAILURE_LABEL: Readonly<Record<FailurePoint, { readonly zh: string; readon
   verification: { zh: '验证执行', en: 'Verification' },
   handoff: { zh: '交接记录', en: 'Handoff' },
   command: { zh: '控制命令', en: 'Command' },
+  stage: { zh: '阶段推进', en: 'Stage advance' },
 }
 
 /** The concrete next move for each point, so a notice never only reports. */
@@ -100,6 +103,10 @@ const FAILURE_ACTION: Readonly<Record<FailurePoint, { readonly zh: string; reado
   command: {
     zh: '按错误信息处理；命令持续失败时重启 DSH 后重试。',
     en: 'Follow the error message; if the command keeps failing, restart DSH and retry.',
+  },
+  stage: {
+    zh: '本轮已中断。按上面的原因补齐推进条件（todo_write 任务单、coding_handoff 的 goal/acceptance、run_verification 通过），或用 /coding stage <name> 手动设置阶段后重试。',
+    en: 'This turn was interrupted. Satisfy the condition named above (a todo_write task list, coding_handoff goal/acceptance, a passing run_verification), or set the stage with /coding stage <name> and retry.',
   },
 }
 

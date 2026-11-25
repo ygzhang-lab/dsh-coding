@@ -86,8 +86,12 @@ export interface CodingState {
    */
   lastRefusal?: string
   readonly transitions: StageTransition[]
-  /** Disposer of the current `allow` restriction on the lead's tool table. */
-  tableRestriction?: () => void
+  /**
+   * 已尝试过投影恢复（已应用，或确认本会话没有可恢复的状态）。非持久化字段：
+   * 不写进 checkpoint，`asCheckpoint` / `restoreFromView` 也不读写它；仅用于让
+   * 后续 pre-step 不再重复读投影。投影尚未就绪时不设置，留给下一步重试。
+   */
+  restored?: boolean
 }
 
 /** Outcome of one attempted stage advance. */
@@ -604,11 +608,31 @@ export function checkTool(state: CodingState, toolName: string): ToolVerdict {
 }
 
 /**
- * Whether the lead's tool table must be trimmed to the delegation set. In the
- * implement stage the model keeps only the delegation verbs: the edit tools are
- * removed from the presentation table, not merely denied at dispatch.
- * @param stage - current stage.
- * @returns the allow-list to apply, or undefined when the table stays whole.
+ * 某阶段对 lead 工具表的 allow-list。
+ * requirements/plan 不裁剪（undefined=全表）；implement 用显式 IMPLEMENT_TABLE；
+ * verify/deliver 由已知工具名 × 阶段准入类动态生成，绝不依赖“恢复全表”。
+ * 类未知的第三方工具保留，避免误伤扩展；`delegate_implement` / `delegate_plan`
+ * 属 delegate 类，而 verify/deliver 的准入类里没有 delegate，因此它们自然被排除，
+ * 不需要（也不该）再加永不命中的按名字过滤。
+ * @param stage - 当前阶段。
+ * @param known - 本 agent scope 实际注册的工具名。
+ * @returns 要应用的 allow-list；undefined 表示保持整表。
+ */
+export function stageToolTable(stage: CodingStage, known: readonly string[]): readonly string[] | undefined {
+  if (stage === 'implement') return IMPLEMENT_TABLE
+  if (stage !== 'verify' && stage !== 'deliver') return undefined
+  return known.filter((name) => {
+    const kind = toolClass(name)
+    if (kind === undefined) return true
+    return stageAdmits(stage, kind)
+  })
+}
+
+/**
+ * @deprecated 由 {@link stageToolTable} 取代：verify/deliver 不再表示“恢复全表”。
+ * 保留这个兼容导出只为旧调用方与现有测试。
+ * @param stage - 当前阶段。
+ * @returns implement 阶段的显式表，其它阶段 undefined。
  */
 export function tableTrim(stage: CodingStage): readonly string[] | undefined {
   return stage === 'implement' ? IMPLEMENT_TABLE : undefined
@@ -710,10 +734,8 @@ export class CodingStateStore {
     return created
   }
 
-  /** Forget one agent's state, releasing its tool-table restriction. */
+  /** Forget one agent's state. The tool-table restriction is released by the preset, per agent. */
   release(agent: object, sessionId: string | undefined): void {
-    const state = this.byAgent.get(agent)
-    state?.tableRestriction?.()
     this.byAgent.delete(agent)
     if (sessionId !== undefined) this.bySession.delete(sessionId)
   }

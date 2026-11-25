@@ -44,6 +44,8 @@ export const STAGE_CONTRACT: Readonly<Record<CodingStage, string>> = {
     '- Note the project state that matters to this request: entry points, existing patterns, the package '
       + 'manager, and the narrowest check that will prove the work.',
     '- Use `read`, `grep`, and `glob`; one inspection command is fine. Do not edit, plan, or verify yet.',
+    '- Reopening an earlier task? Read the archived handoff first with `/coding memory open [keyword]`: '
+      + 'it is a snapshot of an earlier session, while the live handoff and the state machine stay authoritative.',
     '- Record the handoff with `coding_handoff({ goal, constraints, acceptance })` before advancing: codex '
       + 'cannot enter plan without a goal, and the planner only sees this text.',
     '- Advance with `coding_stage({"stage":"plan"})` once you can name the affected files; in `auto` mode, '

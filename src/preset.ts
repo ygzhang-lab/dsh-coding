@@ -12,16 +12,21 @@
  *    one-shot step rejection when the model tried to skip a gate.
  *
  * The tool table is trimmed (`agent.ctx.tools.restrict({ allow })`) during
- * `implement`, so the model does not even see the edit tools it may not use.
+ * `implement`, and re-derived from the stage's admitted classes in
+ * `verify`/`deliver`, so the model does not even see the tools it may not use.
  *
  * @module dsh-coding/preset
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createCodingInitSubmitter } from './commands/coding-init-async.js'
+import { agentScopeOf, createCodingInitHandler, sandboxPolicyOf, serviceOf } from './commands/coding-init.js'
+import { commandText } from './command-text.js'
 import { type CodingConfig, type ReasoningMode } from './config.js'
+import { checkDocRoute, generateDoc } from './lib/doc-model.js'
 import { isWorkerAuto } from './worker-auto.js'
 import { ReasoningController } from './reasoning.js'
 import { reasoningProjection } from './reasoning-projection.js'
-import { writeMemoryDocument } from './memory.js'
+import { readLatestMemory, writeMemoryDocument } from './memory.js'
 import { controlMessage, stageMessage } from './messages.js'
 import { failureNotice, makeFailure, type FailurePoint } from './failures.js'
 import {
@@ -71,8 +76,8 @@ import {
   resetVerification,
   restoreFromView,
   sessionIdOf,
+  stageToolTable,
   statusLine,
-  tableTrim,
   takeFailureNotice,
   takeLastRefusal,
   type CodingState,
@@ -399,6 +404,16 @@ export async function apply(ctx: any): Promise<void> {
     ctx.logger?.warn?.(`dsh-coding: ${point} failed: ${failure.reason}`)
   }
 
+  /**
+   * 记录一次失败，但同一 point + reason 只记一次：恢复会在投影就绪前每个
+   * pre-step 重试，工具表也会每步重算，同一通知每步注入一次是噪声而不是证据。
+   */
+  const failOnce = (state: CodingState, point: FailurePoint, error: unknown): void => {
+    const failure = makeFailure(point, error, currentLanguage())
+    if (state.failure?.point === failure.point && state.failure.reason === failure.reason) return
+    fail(state, point, error)
+  }
+
   try {
     await preflight(ctx, config())
   } catch (error) {
@@ -490,34 +505,72 @@ export async function apply(ctx: any): Promise<void> {
     planOf: (agent: any) => stateOf(agent)?.plan?.items ?? [],
   })
 
+  /** 每个 agent 当前的 restrict disposer；按 agent 保存，state 重建也能撤销。 */
+  const tableRestrictions = new WeakMap<object, () => void>()
+  /** 上次下发的表键（阶段 + allow-list）；键未变时 syncTable 不重建限制。 */
+  const tableKeys = new WeakMap<object, string>()
+
+  /**
+   * 本 agent scope 能出现在 allow-list 里的工具名。必须取 `restrict()` 校验用的
+   * 未受限集合：`ctx.tools.schemas(agent)` 已按当前限制过滤，用它推导目标表会把
+   * 上一个阶段的可见集当成全集（implement→verify 会丢掉 read / run_verification）。
+   */
+  const restrictableTools = (agent: any): Set<string> => {
+    const tools = ctx.tools
+    const view = typeof tools.view === 'function' ? tools.view(agent) : undefined
+    const names = view?.restrictableNames as Iterable<string> | undefined
+    if (names !== undefined) return new Set(names)
+    // 宿主没有暴露未受限视图时只能退回受限表，此时跨阶段切换会退化。
+    ctx.logger?.warn?.('dsh-coding: ctx.tools.view is unavailable; the stage table is derived from the restricted set')
+    return new Set((tools.schemas(agent) as { name: string }[]).map(schema => schema.name))
+  }
+
   /**
    * Re-derive the lead's visible tool table for the current stage. The
-   * restriction is scoped to the agent, so it disappears with that Agent; the
-   * returned disposer is kept so a stage change lifts it immediately.
+   * allow-list is explicit in every stage: implement keeps the delegation set,
+   * verify/deliver are built from the tools this scope actually has and the
+   * classes the stage admits. Every `agent/pre-step` re-derives the table from
+   * the agent scope's actual tool set, and an unchanged key makes that step a
+   * no-op (re-applying would stack restrictions, skipping would hide a tool
+   * registered inside the stage). The disposer is kept per agent in a WeakMap
+   * rather than on the state object: a state rebuilt after a restart must still
+   * be able to lift the previous agent-scope restriction.
    */
   const syncTable = (agent: any, state: CodingState): void => {
-    state.tableRestriction?.()
-    state.tableRestriction = undefined
-    const allow = tableTrim(state.stage)
-    if (allow === undefined) return
     let known: Set<string>
     try {
-      known = new Set((ctx.tools.schemas(agent) as { name: string }[]).map(schema => schema.name))
+      known = restrictableTools(agent)
     } catch (error) {
-      fail(state, 'tool-table', error)
+      failOnce(state, 'tool-table', error)
       return
     }
+    const allow = stageToolTable(state.stage, [...known])
     // `restrict` rejects unknown names; keep only the verbs this scope actually has.
-    const filtered = allow.filter(toolName => known.has(toolName))
-    if (!filtered.includes(TOOL.implement)) {
+    const filtered = allow?.filter(toolName => known.has(toolName))
+    // Only the implement table is defined by delegation: without the verb it
+    // would leave the lead unable to do the stage's work at all.
+    if (state.stage === 'implement' && (filtered === undefined || !filtered.includes(TOOL.implement))) {
       ctx.logger?.warn?.('dsh-coding: delegation tool is missing; the implement table was not trimmed')
+      failOnce(state, 'tool-table', new Error('delegate_implement is not registered; the implement stage tool table was not trimmed'))
+      return
+    }
+    // The table is re-derived on every step, so the key must make an unchanged
+    // table a no-op: re-applying would stack restrictions, while skipping a
+    // changed one would hide a tool registered inside the stage.
+    const key = filtered === undefined ? '' : `${state.stage}\u0000${filtered.join('\u0000')}`
+    if (tableKeys.get(agent) === key) return
+    tableRestrictions.get(agent)?.()
+    tableRestrictions.delete(agent)
+    if (filtered === undefined) {
+      tableKeys.set(agent, key)
       return
     }
     try {
-      state.tableRestriction = agent.ctx.tools.restrict({ allow: filtered })
+      tableRestrictions.set(agent, agent.ctx.tools.restrict({ allow: filtered }))
+      tableKeys.set(agent, key)
     } catch (error) {
-      ctx.logger?.warn?.(`dsh-coding: could not trim the implement tool table: ${String(error)}`)
-      fail(state, 'tool-table', error)
+      ctx.logger?.warn?.(`dsh-coding: could not trim the tool table for the ${state.stage} stage: ${String(error)}`)
+      failOnce(state, 'tool-table', error)
     }
   }
 
@@ -525,27 +578,35 @@ export async function apply(ctx: any): Promise<void> {
    * Seed a resumed session from its durable projection. The live state is a
    * cache; the Session log is the source of truth for the stage, plan, and
    * verification the resumed conversation already recorded.
+   *
+   * The projection may not be ready yet: a missing handle or an inactive view
+   * is `pending`, not “no state”, so the caller retries on a later step instead
+   * of silently dropping back to the entry stage. `no-state` is a confirmed
+   * empty session (no checkpoint and no plan) and ends the retries too.
+   * @returns whether the checkpoint was applied, the session has nothing to
+   *   restore, or the projection is not ready yet.
    */
-  const restore = async (agent: any, state: CodingState): Promise<void> => {
+  const restore = async (agent: any, state: CodingState): Promise<'applied' | 'no-state' | 'pending'> => {
     await projectionReady
     const handle = projectionHandle
     if (handle === undefined) {
       // Registration is the only path that fills the handle, so its failure is
       // what leaves a resumed session without its durable stage.
-      if (projectionError !== undefined) fail(state, 'projection', projectionError)
-      return
+      if (projectionError !== undefined) failOnce(state, 'projection', projectionError)
+      return 'pending'
     }
     let view: CodingStageView | undefined
     try {
       view = handle.stateOf(agent.session)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-coding: could not read the stage projection: ${messageOf(error)}`)
-      fail(state, 'restore', error)
-      return
+      failOnce(state, 'restore', error)
+      return 'pending'
     }
-    if (view === undefined || view.active !== true) return
-    if (view.checkpoint === null && view.plan.length === 0) return
+    if (view === undefined || view.active !== true) return 'pending'
+    if (view.checkpoint === null && view.plan.length === 0) return 'no-state'
     restoreFromView(state, view)
+    return 'applied'
   }
 
   // ── Layer 1: friendly waterfall denial ────────────────────────────────────
@@ -635,6 +696,16 @@ export async function apply(ctx: any): Promise<void> {
   ctx.effect(() => ctx.on('agent/pre-step', async (payload: any, next: () => Promise<any>) => {
     const agent = payload.agent
     const state = stateOf(agent)
+    if (state !== undefined) {
+      // The projection may have become ready since `agent/created`: retry the
+      // restore until it is either applied or confirmed empty, then stop reading
+      // it on every step. A pending restore must not be treated as “no state”, or
+      // the session silently drops back to the entry stage mid-run.
+      if (state.restored !== true && await restore(agent, state) !== 'pending') state.restored = true
+      // A tool registered inside the stage (plugin reload, MCP connect) must not
+      // stay hidden behind the allow-list snapshot taken when the stage began.
+      syncTable(agent, state)
+    }
     // Always delegate first: other listeners own their own decisions.
     const decision = await next()
     if (state === undefined) return decision
@@ -678,14 +749,14 @@ export async function apply(ctx: any): Promise<void> {
     const pending = takeFailureNotice(state)
     const messages = [
       ...decision.messages,
-      stageMessage(text, `coding stage: ${state.stage}`),
-    ]
-    if (pending !== undefined) {
-      messages.push(controlMessage(
+      // The interruption is announced before the contract it affects; the
+      // contract stays the step's last fragment, where the model expects it.
+      ...pending === undefined ? [] : [controlMessage(
         failureNotice(pending, currentLanguage()),
         `runtime failure: ${pending.point}`,
-      ))
-    }
+      )],
+      stageMessage(text, `coding stage: ${state.stage}`),
+    ]
     return { ...decision, messages }
   }), 'dsh-coding: stage context')
 
@@ -719,10 +790,17 @@ export async function apply(ctx: any): Promise<void> {
     // synchronously, before the Host snapshots the step's selection.
     void reasoning.prewarm(agent).catch(() => {})
     // Fresh sessions have an empty projection, so this is a no-op for them.
-    await restore(agent, state)
+    const outcome = await restore(agent, state)
+    // `pending` keeps the marker unset: the first pre-steps retry the restore.
+    if (outcome !== 'pending') state.restored = true
     syncTable(agent, state)
   }), 'dsh-coding: agent created')
   ctx.effect(() => ctx.on('agent/disposed', ({ agent }: any) => {
+    // Release this agent's restriction before its state disappears, so a
+    // rebuilt state object cannot leave the old allow-list in the agent scope.
+    tableRestrictions.get(agent)?.()
+    tableRestrictions.delete(agent)
+    tableKeys.delete(agent)
     store.release(agent, sessionIdOf(agent))
   }), 'dsh-coding: agent disposed')
 
@@ -780,43 +858,53 @@ export async function apply(ctx: any): Promise<void> {
       if (exec.agent === undefined) throw new Error('coding_stage requires an owning agent session')
       const state = stateOf(exec.agent)
       if (state === undefined) throw new Error('coding_stage: this agent is not a Coding lead session')
-      if (args?.stage === undefined) {
+      try {
+        if (args?.stage === undefined) {
+          return {
+            ok: true,
+            stage: state.stage,
+            mode: state.mode,
+            status: statusLine(state),
+            checkpoint: checkpointOf(state),
+          }
+        }
+        const check = checkAdvance(state, args.stage, advanceOptions(exec.agent))
+        if (!check.ok) {
+          const reason = check.reason ?? 'the stage gate refused this move'
+          // Auto's workflow choice is a decision, not a skipped gate: report it
+          // without arming the one-shot step rejection meant for jumping a gate.
+          if (check.soft !== true) recordRefusal(state, args.stage, reason)
+          // A refused advance is why the turn ended: record it so the next step
+          // can tell the user what actually happened.
+          if (check.soft !== true) failOnce(state, 'stage', new Error(reason))
+          return {
+            ok: false,
+            stage: state.stage,
+            mode: state.mode,
+            status: statusLine(state),
+            reason,
+            ...check.soft === true ? { soft: true } : {},
+            checkpoint: checkpointOf(state),
+          }
+        }
+        applyStage(state, args.stage, args.note?.trim() || 'model requested the next stage')
+        // A granted exit from an exhausted retry budget is a blocked delivery:
+        // the report must name the failing check instead of claiming success.
+        if (check.blocked === true) state.deliveryBlocked = true
+        syncTable(exec.agent, state)
+        // The gate is satisfied: a stale "stage advance" alert must not outlive it.
+        clearFailure(state, 'stage')
         return {
           ok: true,
           stage: state.stage,
           mode: state.mode,
           status: statusLine(state),
+          ...check.blocked === true ? { blocked: true } : {},
           checkpoint: checkpointOf(state),
         }
-      }
-      const check = checkAdvance(state, args.stage, advanceOptions(exec.agent))
-      if (!check.ok) {
-        const reason = check.reason ?? 'the stage gate refused this move'
-        // Auto's workflow choice is a decision, not a skipped gate: report it
-        // without arming the one-shot step rejection meant for jumping a gate.
-        if (check.soft !== true) recordRefusal(state, args.stage, reason)
-        return {
-          ok: false,
-          stage: state.stage,
-          mode: state.mode,
-          status: statusLine(state),
-          reason,
-          ...check.soft === true ? { soft: true } : {},
-          checkpoint: checkpointOf(state),
-        }
-      }
-      applyStage(state, args.stage, args.note?.trim() || 'model requested the next stage')
-      // A granted exit from an exhausted retry budget is a blocked delivery:
-      // the report must name the failing check instead of claiming success.
-      if (check.blocked === true) state.deliveryBlocked = true
-      syncTable(exec.agent, state)
-      return {
-        ok: true,
-        stage: state.stage,
-        mode: state.mode,
-        status: statusLine(state),
-        ...check.blocked === true ? { blocked: true } : {},
-        checkpoint: checkpointOf(state),
+      } catch (error) {
+        failOnce(state, 'stage', error)
+        throw error
       }
     },
   })), 'dsh-coding: coding_stage')
@@ -1488,46 +1576,112 @@ export async function apply(ctx: any): Promise<void> {
   // ── Control channel for the UI and the user ──────────────────────────────
   // The body is extracted so an exception becomes a reported failure with a
   // next move: `/coding` is the operator's own recovery path.
+  // /coding init：项目/模块 AGENTS.md 由本会话模型生成；fs 与沙箱策略按 agent 作用域解析。
+  const codingInit = createCodingInitHandler({
+    resolveFs: (agent: unknown) => serviceOf(agentScopeOf(agent), ctx, 'fs'),
+    resolvePolicy: (agent: unknown) => sandboxPolicyOf(agentScopeOf(agent), ctx, agent),
+    language: () => currentLanguage(),
+    generate: async (request) => await generateDoc({
+      agent: request.agent,
+      llm: ctx.llm ?? ctx.get?.('llm'),
+      system: request.system,
+      user: request.user,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    }),
+  })
+
+  // /coding init 异步化：命令立即回执，模型生成/写盘在后台完成，结果经 followup 通知。
+  const submitCodingInit = createCodingInitSubmitter({
+    run: codingInit,
+    checkRoute: (agent: unknown) => checkDocRoute(agent),
+    language: () => currentLanguage(),
+  })
+
   const handleCodingCommand = async ({ agent, rawInput, signal }: { agent: any; rawInput?: string; signal?: AbortSignal }) => {
+    const copy = commandText(currentLanguage())
     const state = stateOf(agent)
     if (state === undefined) {
-      return { kind: 'error' as const, text: 'this session is not running the dsh-coding preset' }
+      return { kind: 'error' as const, text: copy.notCodingSession }
     }
-    const text = typeof rawInput === 'string' ? rawInput.trim().toLowerCase() : ''
+    const raw = typeof rawInput === 'string' ? rawInput.trim() : ''
+    const text = raw.toLowerCase()
+    if (/^init(?:\s|$)/u.test(text)) {
+      const args = raw.slice('init'.length).trim()
+      // 不传 signal：命令 settle 后它会被 abort，后台任务用运行器自己的 signal。
+      return await submitCodingInit({
+        agent,
+        ...(args === '' ? {} : { rawInput: args }),
+      })
+    }
     if (text === '') {
-      return { kind: 'success' as const, text: `${statusLine(state)}\nstages: ${stagePath(state.mode)}` }
+      return {
+        kind: 'success' as const,
+        text: `${statusLine(state)}\n${copy.stagesLabel}: ${stagePath(state.mode)}`,
+      }
     }
     if (text === 'reset') {
       // The budget belongs to the current fix/verify loop; the handoff and
       // the recorded verification stay as evidence.
       resetVerification(state)
-      return { kind: 'success' as const, text: `verification retry budget reset; ${statusLine(state)}` }
+      return { kind: 'success' as const, text: copy.reset(statusLine(state)) }
     }
     if (text === 'memory') {
       // 交接文档由 Host 写盘：浏览器半只发这一行命令，不直接写文件。
-      const written = await writeMemoryDocument(ctx, agent, state, { signal })
-      if (!written.ok) return { kind: 'error' as const, text: `${written.reason} — ${written.action}` }
+      const written = await writeMemoryDocument(ctx, agent, state, {
+        signal,
+        language: currentLanguage(),
+      })
+      if (!written.ok) {
+        return { kind: 'error' as const, text: copy.commandFailed(written.reason, written.action) }
+      }
       return {
         kind: 'success' as const,
-        text: `handoff document written: ${written.displayPath} (session ${state.sessionId})`,
+        text: copy.memoryWritten(written.displayPath, state.sessionId),
       }
+    }
+    // rawInput 是 `/coding` 之后的整行（同 `stage` / `set`），所以子命令是 `memory open`。
+    if (text === 'memory open' || text.startsWith('memory open ')) {
+      // 跨会话接手：只读存档，注入的是「上一轮交接记录」而不是新的运行时状态。
+      const keyword = raw.slice('memory open'.length).trim()
+      const loaded = await readLatestMemory(ctx, agent, {
+        ...(keyword === '' ? {} : { keyword }),
+        ...(signal === undefined ? {} : { signal }),
+        language: currentLanguage(),
+      })
+      if (!loaded.ok) {
+        return { kind: 'error' as const, text: copy.commandFailed(loaded.reason, loaded.action) }
+      }
+      agent.steer?.(controlMessage(
+        'The user is resuming work from an earlier session. Below is an archived handoff document, '
+        + `written by that session's Coding runtime (${loaded.name}).\n`
+        + 'It is a read-only snapshot: the live coding_handoff record and the current state machine remain '
+        + 'authoritative. Start from its goal / definition of done / delivery record / follow-ups, and do not '
+        + 'redo work it records as delivered.\n\n'
+        + `--- begin archived handoff document: ${loaded.name} ---\n`
+        + `${loaded.content.trim()}\n`
+        + `--- end archived handoff document: ${loaded.name} ---`,
+        `archived handoff: ${loaded.name}`,
+      ))
+      return { kind: 'success' as const, text: copy.memoryLoaded(loaded.displayPath) }
     }
     if (text.startsWith('stage')) {
       const target = text.slice('stage'.length).trim() as CodingStage
       if (!(CODING_STAGES as readonly string[]).includes(target)) {
-        return { kind: 'error' as const, text: `unknown stage "${target}"; use ${CODING_STAGES.join(', ')}` }
+        return { kind: 'error' as const, text: copy.unknownStage(target, CODING_STAGES.join(', ')) }
       }
       const check = checkAdvance(state, target, advanceOptions(agent))
       if (!check.ok) {
         // A user-issued move reports the gate but never arms the
         // step-blocking refusal meant for a model that tried to skip it.
-        return { kind: 'error' as const, text: check.reason ?? 'refused' }
+        return { kind: 'error' as const, text: copy.stageRefused(check.reason ?? 'refused') }
       }
       applyStage(state, target, 'user control')
       // A user-issued exit from an exhausted retry budget is still a
       // blocked delivery: the report must disclose the failing check.
       if (check.blocked === true) state.deliveryBlocked = true
       syncTable(agent, state)
+      // The user cleared the gate themselves, so a stale alert must not follow.
+      clearFailure(state, 'stage')
       // A stage change takes effect at the next step of the live turn.
       agent.steer?.(controlMessage(
         `The user moved this session to the ${target} stage.\n\n${stageContext({
@@ -1538,21 +1692,21 @@ export async function apply(ctx: any): Promise<void> {
         })}`,
         `stage → ${target}`,
       ))
-      return { kind: 'success' as const, text: `stage set to ${target}; ${statusLine(state)}` }
+      return { kind: 'success' as const, text: copy.stageSet(target, statusLine(state)) }
     }
     if (text.startsWith('set')) {
       const target = text.slice('set'.length).trim()
       if (!(CODING_MODES as readonly string[]).includes(target)) {
-        return { kind: 'error' as const, text: `unknown mode "${target}"; use ${CODING_MODES.join(', ')}` }
+        return { kind: 'error' as const, text: copy.unknownMode(target, CODING_MODES.join(', ')) }
       }
       applyMode(state, target as CodingMode)
       syncTable(agent, state)
       // Silent by design: the pre-Turn picker sets the mode for the first
       // message and must not start a Turn or inject a control message.
-      return { kind: 'success' as const, text: `mode set to ${target}; ${statusLine(state)}` }
+      return { kind: 'success' as const, text: copy.modeSet(target, statusLine(state)) }
     }
     if (!(CODING_MODES as readonly string[]).includes(text)) {
-      return { kind: 'error' as const, text: `unknown mode "${text}"; use ${CODING_MODES.join(', ')}` }
+      return { kind: 'error' as const, text: copy.unknownMode(text, CODING_MODES.join(', ')) }
     }
     applyMode(state, text as CodingMode)
     syncTable(agent, state)
@@ -1562,14 +1716,14 @@ export async function apply(ctx: any): Promise<void> {
       + 'Continue under that mode; re-read the stage contract injected with the next step.',
       `mode → ${text}`,
     ))
-    return { kind: 'success' as const, text: `mode set to ${text}; ${statusLine(state)}` }
+    return { kind: 'success' as const, text: copy.modeSet(text, statusLine(state)) }
   }
 
   ctx.inject(['commands'], (child: any) => {
     child.commands.register({
       name: 'coding',
-      description: 'Show or set this session\'s Coding mode or stage: /coding <auto|consult|review|codex>, /coding set <mode> (silent, no Turn), or /coding stage <name>. /coding memory writes a handoff document for this turn under .agents/memory at the project root.',
-      input: { hint: 'auto | consult | review | codex | set <auto|consult|review|codex> | stage <requirements|plan|implement|verify|deliver> | reset | memory' },
+      description: commandText(currentLanguage()).description,
+      input: { hint: commandText(currentLanguage()).hint },
       handler: async (payload: { agent: any; rawInput?: string; signal?: AbortSignal }) => {
         try {
           return await handleCodingCommand(payload)
@@ -1577,10 +1731,11 @@ export async function apply(ctx: any): Promise<void> {
           const state = stateOf(payload.agent)
           if (state !== undefined) fail(state, 'command', error)
           const reason = messageOf(error)
+          const copy = commandText(currentLanguage())
           const action = state === undefined
-            ? 'Fix the reported error, then retry the command.'
+            ? copy.noStateAction
             : makeFailure('command', error, currentLanguage()).action
-          return { kind: 'error' as const, text: `${reason} — ${action}` }
+          return { kind: 'error' as const, text: copy.commandFailed(reason, action) }
         }
       },
     })
