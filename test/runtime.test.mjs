@@ -2,7 +2,7 @@
  * Runtime tests for the Coding preset plugin.
  *
  * The harness implements the exact Cordis surface the plugin uses (`on`,
- * `effect`, `tools.register/guard/schemas`, `inject`, `get`) and drives the
+ * `effect`, `tools.register/guard/schemas/view`, `inject`, `get`) and drives the
  * registered listeners the way the Host does: a waterfall chain for
  * `tools/pre-execute` and `agent/pre-step`, a direct call for the guard, and a
  * tool call for the verbs. It asserts the two constraints the plugin exists for:
@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as preset from '../lib/preset.js'
@@ -23,6 +23,8 @@ const CONFIG = {
   plannerWorkerModel: 'deepseek-account/deepseek-v4-pro',
   verifyWorkerModel: 'deepseek-account/deepseek-flash',
   reasoning: 'auto',
+  // 测试不依赖宿主 locale：语言钉成英文，zh 场景在用例里用 config 覆盖
+  language: 'en',
   maxVerifyAttempts: 5,
   maxSameFailure: 2,
   verificationTimeoutMs: 360000,
@@ -36,22 +38,99 @@ async function createHarness(options = {}) {
   const commands = []
   const guards = []
   const restrictions = []
+  /**
+   * 生效中的 agent-scope 限制及其 disposer。插件每次阶段变化都会重算工具表并
+   * 释放上一份限制，所以撤销必须在这里生效：被释放的限制不再隐藏工具。
+   */
+  const restrictionEntries = []
+  /** 应用一条限制，返回插件按 agent 保存的 disposer。 */
+  const restrictScope = (filter) => {
+    const entry = { filter, active: true }
+    restrictionEntries.push(entry)
+    restrictions.push(filter)
+    return () => {
+      if (!entry.active) return
+      entry.active = false
+      const index = restrictions.indexOf(filter)
+      if (index >= 0) restrictions.splice(index, 1)
+    }
+  }
+  /** 所有生效中的 agent-scope 限制是否放行这个工具名。 */
+  const admits = (name) => restrictionEntries.every((entry) => {
+    if (!entry.active) return true
+    const filter = entry.filter
+    if (filter.allow !== undefined && !filter.allow.includes(name)) return false
+    if (filter.deny !== undefined && filter.deny.includes(name)) return false
+    return true
+  })
   const activations = []
   let exitCode = options.exitCode ?? 1
 
-  // The handoff-document writer is the only consumer of the injected fs
-  // service, so a fake records what the Host would have written; `fs: null`
-  // models a Host that exposes no filesystem service at all.
+  // The memory writer and `/coding init` both consume the injected fs service,
+  // so a fake records what the Host would have written; `fs: null` models a
+  // Host that exposes no filesystem service at all.
   const writes = []
+  const files = new Map()
   const fsService = {
     async resolve(path) {
       return { targetKey: path, displayPath: `D:/proj/${path}` }
     },
-    async writeText(target, content, expected) {
-      writes.push({ target, content, expected })
+    async stat(target) {
+      const content = files.get(target.targetKey)
+      if (content !== undefined) return { version: 'v1', type: 'file' }
+      // 目录也答得上：`readLatestMemory` 先 stat 目录再 listDir，目录里有文件就算存在。
+      const key = String(target.targetKey).replace(/[\\/]+$/u, '')
+      const sep = key.includes('\\') ? '\\' : '/'
+      for (const child of files.keys()) {
+        if (child === key || child.startsWith(key + sep)) return { type: 'directory' }
+      }
+      return undefined
+    },
+    async readText(target) {
+      const content = files.get(target.targetKey)
+      if (content === undefined) throw new Error(`ENOENT: ${String(target.targetKey)}`)
+      return content
+    },
+    // 读取交接文档要枚举目录：只列 `.agents/memory` 的直接子项，深层路径留给读盘报错。
+    async listDir(target) {
+      const key = String(target.targetKey)
+      const sep = key.includes('\\') ? '\\' : '/'
+      const prefix = key.replace(/[\\/]+$/u, '') + sep
+      const entries = []
+      for (const child of files.keys()) {
+        if (!child.startsWith(prefix)) continue
+        const rest = child.slice(prefix.length)
+        if (rest.includes('\\') || rest.includes('/')) continue
+        entries.push({ name: rest, type: 'file', target: { targetKey: child, displayPath: `D:/proj/${child}` } })
+      }
+      return entries
+    },
+    async writeText(target, content, expected, _signal, policy) {
+      writes.push({ target, content, expected, policy })
+      files.set(target.targetKey, content)
       return { operation: 'create', version: 'v1' }
     },
   }
+
+  // `/coding init` 现在立即回执、后台生成：假 Host 记下 followup 回执与在途后台任务。
+  // runMaintenance 模拟宿主维护名额，忙时同步抛错，插件应退回独立后台任务。
+  const followups = []
+  const backgroundTasks = []
+  let maintenanceMode = options.maintenance ?? 'ok' // 'ok' | 'busy'
+  const runMaintenance = (task) => {
+    if (maintenanceMode === 'busy') throw new Error('agent is busy')
+    const promise = task(new AbortController().signal)
+    backgroundTasks.push(promise)
+    return promise
+  }
+  /** 等所有排队中的后台任务 settle；后台任务的 rejection 已被运行器吞掉。 */
+  async function waitForBackground() {
+    while (backgroundTasks.length > 0) {
+      const batch = backgroundTasks.splice(0)
+      await Promise.allSettled(batch)
+    }
+  }
+  function setMaintenanceMode(mode) { maintenanceMode = mode }
 
   const tools = new Map()
   const add = (definition) => {
@@ -81,7 +160,18 @@ async function createHarness(options = {}) {
         }
       },
     },
-    llm: { listProviders: () => [{ id: 'deepseek-account' }] },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-account' }],
+      async prepareCall(config) {
+        return {
+          config: { ...config },
+          async *stream() {
+            yield { type: 'text-delta', index: 0, text: '## 快速开始\n\n- 安装：`pnpm install`\n' }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          },
+        }
+      },
+    },
     agentPresets: {},
     sessionProjections: {
       register(definition) {
@@ -124,12 +214,22 @@ async function createHarness(options = {}) {
         guards.push(guard)
         return () => {}
       },
+      /** 与真实 DSH 同构：schemas() 只返回当前限制放行的定义。 */
       schemas() {
-        return [...tools.values()]
+        return [...tools.entries()].filter(([name]) => admits(name)).map(([, definition]) => definition)
+      },
+      /** 与真实 DSH 同构：view() 暴露未受限的 knownNames / restrictableNames。 */
+      view() {
+        const visibleTools = new Map([...tools.entries()].filter(([name]) => admits(name)))
+        return {
+          visible: visibleTools,
+          registrations: visibleTools,
+          knownNames: new Set(tools.keys()),
+          restrictableNames: new Set(tools.keys()),
+        }
       },
       restrict(filter) {
-        restrictions.push(filter)
-        return () => {}
+        return restrictScope(filter)
       },
     },
     inject(services, callback) {
@@ -147,12 +247,8 @@ async function createHarness(options = {}) {
 
   await preset.apply(ctx)
 
-  /** Visible tool names after every agent-scope restriction. */
-  const visible = () => [...tools.keys()].filter((name) => restrictions.every((filter) => {
-    if (filter.allow !== undefined && !filter.allow.includes(name)) return false
-    if (filter.deny !== undefined && filter.deny.includes(name)) return false
-    return true
-  }))
+  /** Visible tool names after every active agent-scope restriction. */
+  const visible = () => [...tools.keys()].filter(admits)
 
   /** Drive one waterfall the way the Host does, ending in the supplied default. */
   async function waterfall(event, args, fallback) {
@@ -200,8 +296,9 @@ async function createHarness(options = {}) {
   }
 
   return {
-    ctx, tools, guards, restrictions, activations, commands, writes,
-    listeners, visible, preExecute, preStep, postExecute, callTool, waterfall,
+    ctx, tools, guards, restrictions, activations, commands, writes, files, followups,
+    listeners, visible, preExecute, preStep, postExecute, callTool, waterfall, restrictScope,
+    waitForBackground, setMaintenanceMode, runMaintenance,
     setExitCode(value) { exitCode = value },
   }
 }
@@ -213,10 +310,15 @@ function makeAgent(cwd, harness) {
     ctx: {
       tools: {
         restrict(filter) {
-          harness.restrictions.push(filter)
-          return () => {}
+          return harness.restrictScope(filter)
         },
       },
+    },
+    followup(message) {
+      harness.followups.push(message)
+    },
+    runMaintenance(task) {
+      return harness.runMaintenance(task)
     },
   }
 }
@@ -225,6 +327,13 @@ function makeAgent(cwd, harness) {
 async function created(harness, agent) {
   for (const listener of harness.listeners.get('agent/created') ?? []) {
     await listener({ agent, source: 'startup' })
+  }
+}
+
+/** Emit agent/disposed so the plugin releases the agent's scope, state, and table restriction. */
+function disposed(harness, agent) {
+  for (const listener of harness.listeners.get('agent/disposed') ?? []) {
+    listener({ agent })
   }
 }
 
@@ -824,6 +933,183 @@ test('/coding control verbs reach the agent as steering or follow-up', async () 
   assert.equal((await command.handler({ agent, rawInput: 'set shipping' })).kind, 'error')
 })
 
+/** 建一个 `/coding init` 用的临时项目：清单 + 一个源码文件 + README。 */
+async function initProject(prefix) {
+  const dir = await mkdtemp(join(tmpdir(), prefix))
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { test: 'exit 0' } }))
+  await mkdir(join(dir, 'src'), { recursive: true })
+  await writeFile(join(dir, 'src/index.ts'), 'export const answer = 42\n')
+  await writeFile(join(dir, 'README.md'), '# fixture\n\nA fixture repository.\n')
+  return dir
+}
+
+test('/coding init generates AGENTS.md through the session model', async () => {
+  const dir = await initProject('dsh-coding-init-')
+  // 回执中文：显式钉住会话语言，不依赖跑测试这台机器的 locale。
+  const harness = await createHarness({ config: { language: 'zh' } })
+  const agent = makeAgent(dir, harness)
+  agent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  await created(harness, agent)
+
+  const command = harness.commands[0]
+  assert.match(command.description, /init/u)
+  assert.match(command.input.hint, /init/u)
+
+  const result = await command.handler({ agent, rawInput: 'init', signal: new AbortController().signal })
+  assert.equal(result.kind, 'success')
+  // 命令先回执：既没写盘，也没有完成通知，模型还在后台跑。
+  assert.match(result.text, /已开始文档生成/u, '回执说清任务已在后台开始')
+  assert.match(result.text, /后台执行/u)
+  assert.match(result.text, /deepseek-account\/deepseek-flash/u, '回执带本次使用的模型路由')
+  assert.equal(harness.writes.length, 0, '回执先于写盘')
+  assert.equal(harness.followups.length, 0, '回执先于完成通知')
+
+  // 后台跑完：写出一份文档，并回一条 followup 通知。
+  await harness.waitForBackground()
+  assert.equal(harness.writes.length, 1, '后台任务写出一份项目级文档')
+  const write = harness.writes[0]
+  assert.equal(write.target.targetKey, join(dir, 'AGENTS.md'))
+  assert.match(write.content, /^# AGENTS\.md — fixture/u, '标题行来自项目事实')
+  assert.match(write.content, /## 快速开始/u, 'the written document carries the model section')
+  assert.match(write.content, /pnpm install/u, 'the model body reaches the file')
+  assert.doesNotMatch(write.content, /TODO|待补充/u, '文档里不再残留占位符')
+
+  assert.equal(harness.followups.length, 1, '完成后只回一条通知')
+  assert.equal(harness.followups[0].source.kind, 'dsh-coding-control')
+  const notice = harness.followups[0].content[0].text
+  assert.match(notice, /文档生成完成/u)
+  assert.match(notice, /运行时回执，无需调用工具/u)
+})
+
+test('/coding init refuses an empty project without writing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-coding-init-empty-'))
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'fixture' }))
+  const harness = await createHarness({ config: { language: 'zh' } })
+  const agent = makeAgent(dir, harness)
+  await created(harness, agent)
+
+  const result = await harness.commands[0].handler({
+    agent,
+    rawInput: 'init -modules',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /未检测到代码文件/u)
+  assert.equal(harness.writes.length, 0, 'an empty project writes nothing')
+  assert.equal(harness.followups.length, 0, '空项目不启动后台，也就没有通知')
+})
+
+test('/coding init passes the session sandbox policy to the write', async () => {
+  const dir = await initProject('dsh-coding-init-policy-')
+  const harness = await createHarness()
+  const agent = makeAgent(dir, harness)
+  agent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  const policy = { mode: 'workspace-write' }
+  const resolveInputs = []
+  agent.ctx.sandboxPolicy = {
+    async resolve(input) {
+      resolveInputs.push(input)
+      return policy
+    },
+  }
+  await created(harness, agent)
+
+  const result = await harness.commands[0].handler({
+    agent,
+    rawInput: 'init',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'success')
+  await harness.waitForBackground()
+  assert.equal(harness.writes.length, 1)
+  assert.equal(harness.writes[0].policy, policy, 'the resolved policy is passed through unchanged')
+  assert.equal(resolveInputs[0].session, agent.session, 'the policy is resolved for this session')
+})
+
+test('/coding init falls back to a detached task when the agent is busy', async () => {
+  const dir = await initProject('dsh-coding-init-busy-')
+  const harness = await createHarness({ config: { language: 'zh' } })
+  harness.setMaintenanceMode('busy')
+  const agent = makeAgent(dir, harness)
+  agent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  await created(harness, agent)
+
+  const result = await harness.commands[0].handler({
+    agent,
+    rawInput: 'init',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /宿主正忙/u, '回执说明维护名额被占，已改用独立后台任务')
+  assert.match(result.text, /独立后台任务/u)
+
+  // 独立后台任务不进 backgroundTasks（维护名额已同步抛错），只能轮询等待完成。
+  for (let i = 0; i < 100; i++) {
+    if (harness.followups.length > 0) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(harness.writes.length, 1, '独立后台任务照样写盘')
+  assert.equal(harness.followups.length, 1, '独立后台任务照样回通知')
+})
+
+test('/coding init refuses synchronously when the session has no model', async () => {
+  const dir = await initProject('dsh-coding-init-nomodel-')
+  const harness = await createHarness({ config: { language: 'zh' } })
+  const agent = makeAgent(dir, harness)
+  await created(harness, agent)
+
+  const result = await harness.commands[0].handler({
+    agent,
+    rawInput: 'init',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'error', '读不到模型就同步拒绝')
+  assert.match(result.text, /读不到本会话当前模型/u)
+  assert.equal(harness.writes.length, 0, '没有模型不写任何文件')
+  assert.equal(harness.followups.length, 0, '没有模型不启动后台任务')
+})
+
+/** 回执里的中文；英文模式下必须一个都没有。 */
+const CJK = /[\u4e00-\u9fff]/u
+
+test('/coding init receipts follow the configured conversation language', async () => {
+  const dir = await initProject('dsh-coding-init-lang-')
+
+  // 英文：立即回执与后台完成通知都说英文，且不含中文。
+  const en = await createHarness({ config: { language: 'en' } })
+  const enAgent = makeAgent(dir, en)
+  enAgent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  await created(en, enAgent)
+  const enResult = await en.commands[0].handler({
+    agent: enAgent,
+    rawInput: 'init',
+    signal: new AbortController().signal,
+  })
+  assert.equal(enResult.kind, 'success')
+  assert.match(enResult.text, /Background document generation started/u, '英文立即回执')
+  assert.doesNotMatch(enResult.text, CJK, '英文回执不含中文')
+  await en.waitForBackground()
+  assert.equal(en.followups.length, 1, '英文模式后台完成同样回一条通知')
+  const enNotice = en.followups[0].content[0].text
+  assert.match(enNotice, /Document generation completed/u, '英文完成通知')
+  assert.doesNotMatch(enNotice, CJK, '英文通知不含中文')
+
+  // 中文：显式覆盖默认的 en，回执保持既有中文文案。
+  const zh = await createHarness({ config: { language: 'zh' } })
+  const zhAgent = makeAgent(dir, zh)
+  zhAgent.model = { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  await created(zh, zhAgent)
+  const zhResult = await zh.commands[0].handler({
+    agent: zhAgent,
+    rawInput: 'init',
+    signal: new AbortController().signal,
+  })
+  assert.equal(zhResult.kind, 'success')
+  assert.match(zhResult.text, /已开始文档生成/u, '中文立即回执')
+  await zh.waitForBackground()
+  assert.match(zh.followups[0].content[0].text, /文档生成完成/u, '中文完成通知')
+})
+
 test('a misconfigured worker route fails the mount instead of inheriting the lead model', async () => {
   const harness = await createHarness()
   harness.ctx.dshCodingRuntime.options = { ...CONFIG, implementWorkerModel: '' }
@@ -925,6 +1211,73 @@ test('a resumed plan stage advances on its recorded task list', async () => {
 
   const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
   assert.equal(advanced.ok, true, 'the restored plan satisfies the plan gate')
+})
+
+test('state 重建后释放旧的 implement 裁剪，verify 重新拿到 run_verification', async () => {
+  const harness = await createHarness({ exitCode: 0 })
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+
+  const implemented = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(implemented.ok, true)
+  const trimmed = harness.visible()
+  assert.equal(trimmed.includes('apply_patch'), false, 'implement 期间主代理看不到 apply_patch')
+  assert.equal(trimmed.includes(TOOL.implement), true, 'implement 期间委派动词仍可见')
+  assert.equal(harness.restrictions.length, 1, '一个 agent 只持有一份限制')
+
+  // state 重建：disposed 释放这个 agent 的旧限制，created 再按新状态重新建档。
+  disposed(harness, agent)
+  await created(harness, agent)
+  assert.equal(harness.visible().includes('apply_patch'), true, '旧 implement 限制已随 agent/disposed 释放')
+
+  const rebuilt = await harness.callTool(TOOL.stage, {}, agent)
+  assert.equal(rebuilt.stage, 'requirements', '重建后的状态从入口阶段重新开始')
+
+  // 重建后重走 requirements → plan → implement → delegate → verify。
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  const verified = await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  assert.equal(verified.ok, true)
+
+  const table = harness.visible()
+  assert.equal(table.includes(TOOL.verification), true, 'verify 工具表重新包含 run_verification')
+  assert.equal(table.includes(TOOL.verify), true, 'verify 工具表包含 delegate_verify')
+  assert.equal(table.includes(TOOL.implement), false, 'verify 工具表不含 delegate_implement')
+  assert.equal(table.includes('apply_patch'), false, 'verify 工具表不含写类工具')
+  assert.equal(harness.restrictions.length, 1, '重入 implement 与切到 verify 都不叠加限制')
+})
+
+test('投影晚就绪时首个 pre-step 重试恢复，并下发 verify 工具表', async () => {
+  const events = []
+  const harness = await createHarness({ projectionEvents: events, exitCode: 0 })
+  const agent = makeAgent(process.cwd(), harness)
+  // 会话先以别的预设开始：投影此刻 active=false，created 的恢复只能是 pending。
+  agent.session.header.agentPreset = 'standard'
+  await created(harness, agent)
+  assert.equal(harness.visible().includes('apply_patch'), true, '待恢复会话的工具表尚未被裁剪')
+
+  // 首次 pre-step 之前投影才就绪：选择 Coding 预设，并落一条 verify 阶段的整值 checkpoint。
+  events.push({ type: 'agent-preset/selected', time: 9, data: { agentPreset: 'dsh-coding' } })
+  events.push(...resumeEvents('verify', RESUME_VERIFICATION))
+
+  const first = await harness.preStep(agent, [])
+  assert.equal(first.kind, 'enter', 'pre-step 的重试恢复不阻塞这一步')
+
+  const restored = await harness.callTool(TOOL.stage, {}, agent)
+  assert.equal(restored.stage, 'verify', '重试把 checkpoint 里的阶段恢复回来')
+  assert.equal(harness.visible().includes(TOOL.verification), true, '恢复后同步为 verify 工具表')
+  assert.equal(harness.visible().includes('apply_patch'), false, 'verify 工具表不含写类工具')
+
+  // 第二次 pre-step 不再重复恢复：不报错、不叠加限制、状态保持 verify。
+  const second = await harness.preStep(agent, [])
+  assert.equal(second.kind, 'enter')
+  const kept = await harness.callTool(TOOL.stage, {}, agent)
+  assert.equal(kept.stage, 'verify', '状态保持 verify')
+  assert.equal(harness.restrictions.length, 1, '重试只下发一次限制')
 })
 
 test('two delegations take distinct worker names', async () => {
@@ -1420,7 +1773,7 @@ test('/coding memory writes the handoff document through the fs service', async 
 
   assert.equal(harness.writes.length, 1, 'one command writes exactly one document')
   const write = harness.writes[0]
-  assert.match(write.target.targetKey, /\.agents[\\/]memory[\\/]session-1-\d{8}-\d{6}\.md$/u)
+  assert.match(write.target.targetKey, /\.agents[\\/]memory[\\/]\d{8}-\d{6}-fix-the-bug\.md$/u)
   assert.deepEqual(write.expected, { kind: 'createIfAbsent' }, 'a second press never overwrites the first file')
   const name = write.target.targetKey.split(/[\\/]/u).at(-1)
   assert.ok(receipt.text.includes(name), 'the receipt names the file it wrote')
@@ -1444,6 +1797,63 @@ test('/coding memory reports a missing fs service instead of throwing', async ()
   assert.equal(receipt.kind, 'error')
   assert.match(receipt.text, /fs service/u)
   assert.equal(harness.writes.length, 0, 'nothing is written when the Host serves no filesystem')
+})
+
+test('/coding memory open loads the newest archived handoff document', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-coding-memory-open-'))
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { test: 'exit 0' } }))
+  const harness = await createHarness({ exitCode: 0 })
+  const agent = makeAgent(dir, harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  const run = await harness.callTool(TOOL.verification, { kind: 'test', scope: 'package' }, agent)
+  assert.equal(run.passed, true, 'the passing check opens deliver')
+  await harness.callTool(TOOL.stage, { stage: 'deliver' }, agent)
+
+  // 先写一篇交接文档，再用同一个 agent 读回它（同秒内无法写出第二篇）。
+  const written = await harness.commands[0].handler({
+    agent,
+    rawInput: 'memory',
+    signal: new AbortController().signal,
+  })
+  assert.equal(written.kind, 'success')
+  assert.equal(harness.writes.length, 1)
+
+  const steered = []
+  agent.steer = (message) => steered.push(message)
+
+  const receipt = await harness.commands[0].handler({
+    agent,
+    rawInput: 'memory open',
+    signal: new AbortController().signal,
+  })
+  assert.equal(receipt.kind, 'success')
+  assert.match(receipt.text, /handoff document loaded:/u)
+
+  assert.equal(steered.length, 1, 'the archived document reaches the live session exactly once')
+  assert.equal(steered[0].source.kind, 'dsh-coding-control')
+  const injected = steered[0].content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+  assert.match(injected, /archived handoff/u)
+  assert.match(injected, /read-only snapshot/u)
+  assert.match(injected, /coding_handoff/u, 'the notice keeps the live record authoritative')
+  assert.match(injected, /# Coding 任务交接文档/u, 'the document body is injected')
+  assert.match(injected, /fix the bug/u)
+
+  const missing = await harness.commands[0].handler({
+    agent,
+    rawInput: 'memory open no-such-keyword',
+    signal: new AbortController().signal,
+  })
+  assert.equal(missing.kind, 'error')
+  assert.match(missing.text, /no handoff document matches/u)
+  assert.equal(steered.length, 1, 'a failed read injects nothing')
 })
 
 test('codex refuses implement for a complex task list until the planner ran', async () => {
@@ -1539,4 +1949,80 @@ test('a lead whose model selection is unreadable is not the planner', async () =
   const flash = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
   assert.equal(flash.ok, false)
   assert.match(flash.reason, /delegate_plan/)
+})
+
+test('阶段内新注册的工具在下一步可见，且不叠加限制', async () => {
+  const harness = await createHarness({ exitCode: 0 })
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  assert.equal(harness.visible().includes('late_tool'), false, '进入阶段时快照里没有这个工具')
+
+  // 进入 verify 之后才注册的工具（插件热加载 / MCP 连接）。
+  harness.ctx.tools.register({
+    name: 'late_tool',
+    description: 'late',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: () => [] },
+    execute: async () => '',
+  })
+  await harness.preStep(agent, [])
+  assert.equal(harness.visible().includes('late_tool'), true, '下一步重算工具表后即可见')
+  assert.equal(harness.restrictions.length, 1, '重算不叠加限制')
+})
+
+test('implement 切到 verify 时按未受限全集重建工具表', async () => {
+  const harness = await createHarness({ exitCode: 0 })
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+  writePlan(harness, agent)
+  await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  const implementing = harness.visible()
+  assert.equal(implementing.includes('read'), false, 'implement 只剩委派集')
+  assert.equal(implementing.includes(TOOL.implement), true)
+
+  await harness.callTool(TOOL.implement, { task: 'fix it' }, agent)
+  await harness.callTool(TOOL.stage, { stage: 'verify' }, agent)
+  const verifying = harness.visible()
+  for (const name of ['read', 'grep', TOOL.verification, TOOL.verify, 'bash', 'todo_write']) {
+    assert.equal(verifying.includes(name), true, `verify 表应含 ${name}`)
+  }
+  for (const name of ['apply_patch', 'write', 'edit', TOOL.implement]) {
+    assert.equal(verifying.includes(name), false, `verify 表不应含 ${name}`)
+  }
+})
+
+test('阶段推进被拒时用户能看到运行中断提示', async () => {
+  const harness = await createHarness()
+  const agent = makeAgent(process.cwd(), harness)
+  await created(harness, agent)
+  await reachPlan(harness, agent)
+
+  // 没有任务单就推进 implement：被拒，并记成一次阶段推进失败。
+  const refused = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(refused.ok, false)
+  const view = await harness.callTool(TOOL.stage, {}, agent)
+  assert.equal(view.checkpoint.failure.point, 'stage')
+  assert.match(view.status, /failure stage/)
+
+  // 下一步被阻断（模型跳过了门禁），提示留给再下一步。
+  const blocked = await harness.preStep(agent, [])
+  assert.equal(blocked.kind, 'reject')
+  const next = await harness.preStep(agent, [])
+  const notice = next.messages.find((message) => message.source?.kind === 'dsh-coding-control')
+  assert.ok(notice, '拒绝要以控制消息形式告知用户')
+  assert.match(notice.content[0].text, /运行中断|runtime failure/)
+  assert.match(notice.content[0].text, /阶段推进|Stage advance/)
+
+  // 条件补齐后推进成功，失败标记清除。
+  writePlan(harness, agent)
+  const advanced = await harness.callTool(TOOL.stage, { stage: 'implement' }, agent)
+  assert.equal(advanced.ok, true)
+  const cleared = await harness.callTool(TOOL.stage, {}, agent)
+  assert.equal(cleared.checkpoint.failure, undefined)
 })

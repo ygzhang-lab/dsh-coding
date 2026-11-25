@@ -38,6 +38,7 @@ import {
   recordVerification,
   resetVerification,
   restoreFromView,
+  stageToolTable,
   statusLine,
   tableTrim,
 } from '../lib/state.js'
@@ -303,6 +304,44 @@ test('the implement table is exactly the delegation set', () => {
   assert.equal(IMPLEMENT_TABLE.includes('edit'), false)
   assert.equal(IMPLEMENT_TABLE.includes('write'), false)
   assert.equal(tableTrim('requirements'), undefined)
+})
+
+test('stageToolTable 为 verify / deliver 按阶段准入显式裁剪', () => {
+  // 本 agent scope 实际注册的工具名：编码工具 + 一个类未知的第三方工具。
+  const known = [
+    'read', 'grep', 'run_verification', 'delegate_verify', 'delegate_plan', 'delegate_implement',
+    'write', 'edit', 'apply_patch', 'bash', 'pwsh', 'todo_write', 'coding_stage', 'coding_mode',
+    'coding_reasoning', 'coding_handoff', 'third_party_tool',
+  ]
+
+  const verify = stageToolTable('verify', known)
+  for (const name of [
+    'run_verification', 'delegate_verify', 'read', 'bash', 'pwsh', 'todo_write',
+    'coding_stage', 'coding_handoff', 'third_party_tool',
+  ]) {
+    assert.equal(verify.includes(name), true, `${name} 在 verify 阶段仍可见`)
+  }
+  // delegate_plan / delegate_implement 属 delegate 类，verify 不授予；写类同样被裁掉。
+  for (const name of ['delegate_plan', 'delegate_implement', 'write', 'edit', 'apply_patch']) {
+    assert.equal(verify.includes(name), false, `${name} 在 verify 阶段必须被裁掉`)
+  }
+
+  const deliver = stageToolTable('deliver', known)
+  for (const name of ['read', 'todo_write', 'coding_stage', 'coding_handoff', 'third_party_tool']) {
+    assert.equal(deliver.includes(name), true, `${name} 在 deliver 阶段仍可见`)
+  }
+  // 交付只报告：验证、执行、写与委派动词全部裁掉。
+  for (const name of [
+    'run_verification', 'delegate_verify', 'delegate_plan', 'delegate_implement',
+    'bash', 'pwsh', 'write', 'edit', 'apply_patch',
+  ]) {
+    assert.equal(deliver.includes(name), false, `${name} 在 deliver 阶段必须被裁掉`)
+  }
+
+  // implement 仍用显式表，requirements / plan 不裁剪（undefined 表示保持整表）。
+  assert.deepEqual([...stageToolTable('implement', known)].sort(), [...IMPLEMENT_TABLE].sort())
+  assert.equal(stageToolTable('requirements', known), undefined)
+  assert.equal(stageToolTable('plan', known), undefined)
 })
 
 test('stage admissions stay in sync with the tool classes', () => {
