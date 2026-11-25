@@ -2,26 +2,38 @@
 
 面向智能体与维护者的通用指令与仓库入口。使用者看 [README](README.md)；为什么这样设计见 [docs/DETAIL.md](docs/DETAIL.md)。
 
+## 这个仓库的目标与成功标准
+
+这是 DSH 的编程智能体插件。它存在的目的是让一个工程任务按 requirements → plan → implement → verify → deliver 走完，并且每一步都在插件侧留下可查的证据（阶段、工具表、验证记录、交接记录），而不是靠模型自觉。
+
+一次好的改动：门禁仍然只用 `deny`，工具裁剪与 guard 拒绝两层仍然一致，测试跑构建产物 `lib/*.js` 后全绿，文档与 `src` 结构对得上（模块表、路径、约束编号）。后面所有规则都是从这几条成功标准推出来的；规则失效的后果写在每条规则后面。
+
+## 项目背景
+
+这是 DSH 的编程智能体插件。默认三个 worker（planner / implement / verify）跟随主代理当前模型（`auto`）；也可以在插件页分别给它们指定模型，例如 planner 用 pro、implement 与 verify 用 flash，做 Pro/Flash 分工。
+
 **按目录阅读**（上游 `agent-instructions` 会在触碰对应目录文件时自动注入子文件；也可以主动读）：
 
-- 改 `src/` 下任何代码前：先读 [src/AGENTS.md](https://github.com/ygzhang-lab/dsh-coding/blob/main/src/AGENTS.md)（DSH 契约表、约束 1-23、src 模块表、调试表）。
-- 改 `test/` 前：读 [test/AGENTS.md](https://github.com/ygzhang-lab/dsh-coding/blob/main/test/AGENTS.md)（测试矩阵、验证步骤）。
-- 改 `scripts/` 前：读 [scripts/AGENTS.md](https://github.com/ygzhang-lab/dsh-coding/blob/main/scripts/AGENTS.md)（构建流程与挂载调试）。
+- 改 `src/` 下任何代码前：先读 [src/AGENTS.md](src/AGENTS.md)（DSH 契约表、约束 1-27、src 模块表、调试表）。
+- 改 `test/` 前：读 [test/AGENTS.md](test/AGENTS.md)（测试矩阵、验证步骤）。
+- 改 `scripts/` 前：读 [scripts/AGENTS.md](scripts/AGENTS.md)（构建流程与挂载调试）。
 
 ## 会话边界：一次会话只跑一个任务
 
 一个 Coding 会话只服务一个任务；换任务请新开会话，不要在同一个会话里接着做第二个任务。
 
-原因：`coding_handoff` 的 constraints / decisions / findings / acceptance / tasks 等列表字段只追加，只有 `goal` 与 `delivered` 会覆盖；复用会话时，上一个任务的 `acceptance` 仍会满足新任务进入 verify / deliver 的门禁，等于用旧证据放行新任务。`coding_handoff({ reset: true })` 只重置验证重试预算，不清空交接记录。
+原因：`coding_handoff` 的 constraints / decisions / findings / acceptance / tasks 等列表字段只追加，只有 `goal` 与 `delivered` 会覆盖；复用会话时，上一个任务的 `acceptance` 仍会满足新任务进入 verify / deliver 的门禁，等于用旧证据放行新任务，交付结论就不可信了。`coding_handoff({ reset: true })` 只重置验证重试预算，不清空交接记录。
 
 ## 0. 不可违背的硬规则（速览，完整条款见 src/AGENTS.md）
 
-1. 门禁只用 `deny`，不要改成 `ask`（审批语义）。详见 src/AGENTS.md 约束 1。
-2. `tools.restrict` 裁剪与 `tools/pre-execute`/guard 拒绝必须双层并存。详见 src/AGENTS.md 约束 2。
-3. 子代理白名单只写在预设组合里，不继承父级限制，也不经 `agentOptions` 传递。详见 src/AGENTS.md 约束 4。
-4. 不新增自定义 Session 事件类型；新状态放进整值 checkpoint 或 `ctx.sessionProjections`。详见 src/AGENTS.md 约束 5。
-5. 所有监听与注册（含客户端 `locale`/Definition）都包在 `ctx.effect` 里。详见 src/AGENTS.md 约束 6。
-6. worker 路由只能是 `auto` 或显式 `provider/model`：`auto` 在派发时解析为主代理当前模型且仍过 `assertWorkerModel`；解析失败即派发失败，不得静默回退或替换成别的路由。详见 src/AGENTS.md 约束 7。
+下面六条是上面成功标准的直接落点：破一条，任务流程就不再是「五步 + 证据」，而是模型想怎么走就怎么走。
+
+1. 门禁只用 `deny`，不要改成 `ask`（审批语义）。详见 src/AGENTS.md 约束 1。改成 `ask` 会把拦截变成人工审批，没人确认时会话就停在原地，门禁等于不存在。
+2. `tools.restrict` 裁剪与 `tools/pre-execute`/guard 拒绝必须双层并存。详见 src/AGENTS.md 约束 2。裁剪决定模型看得见哪些工具，guard 决定调用能不能过；少一层，另一条路径就能绕过阶段限制。
+3. 子代理白名单只写在预设组合里，不继承父级限制，也不经 `agentOptions` 传递。详见 src/AGENTS.md 约束 4。继承会让 worker 按父级的临时状态干活，同一预设的行为随主会话漂移，问题复现不了。
+4. 不新增自定义 Session 事件类型；新状态放进整值 checkpoint 或 `ctx.sessionProjections`。详见 src/AGENTS.md 约束 5。旧版本遇到未知事件会拒绝重开会话，等于让用户的会话记录打不开。
+5. 所有监听与注册（含客户端 `locale`/Definition）都包在 `ctx.effect` 里。详见 src/AGENTS.md 约束 6。插件卸载或重载时只有 `ctx.effect` 里的东西会被回收，漏在外面的会重复注册、泄漏监听。
+6. worker 路由只能是 `auto` 或显式 `provider/model`：`auto` 在派发时解析为主代理当前模型且仍过 `assertWorkerModel`；解析失败即派发失败，不得静默回退或替换成别的路由。详见 src/AGENTS.md 约束 7。静默回退会让回执里写的模型和实际干活的不一致，出问题时无从查起。
 
 ## 1. 环境与命令
 
@@ -73,26 +85,16 @@ pnpm publish          # prepublishOnly 会再跑一遍 typecheck/build/test
 
 项目在 macOS 上开发，Windows 上继续维护时注意以下已实测的差异：
 
-1. **shell 调用按平台分叉**：`src/verification.ts` 的 `shellArgv()` 在 Windows 上返回 `['cmd.exe','/d','/s','/c',command]`，其它平台返回 `['/bin/sh','-c',command]`。任何断言 `argv` 前缀的测试都必须按 `process.platform` 推导期望值，不要硬编码 `/bin/sh`。
+1. **shell 调用按平台分叉**：`src/tools/verification.ts` 的 `shellArgv()` 在 Windows 上返回 `['cmd.exe','/d','/s','/c',command]`，其它平台返回 `['/bin/sh','-c',command]`。任何断言 `argv` 前缀的测试都必须按 `process.platform` 推导期望值，不要硬编码 `/bin/sh`，否则 Windows 上测试直接红。
 2. **DSH 沙箱会拦截子进程管道**：在 DSH 的 `workspace-write` 文件沙箱下，`pnpm build`（esbuild）与 `pnpm test`（`node --test` 为每个测试文件起子进程）会以 `spawn EPERM` 失败，因为子进程需要管道 stdio。这不是代码缺陷：在普通终端运行，或在 DSH 中对该命令提权后运行。
-3. **`src/system-language.ts` 只有 macOS 分支**：读取 `AppleLanguages` 的探测仅 macOS 生效，其它平台返回空数组并回退到宿主的 locale 解析；改语言逻辑时不要假设该模块在 Windows 有输出。
-4. **路径处理一律用 `node:path`**：不要拼接 `/` 或假设大小写不敏感；测试里的固定路径字符串（如 `/tmp/fixture`）只作为传入假 provider 的不透明值。
-5. 文档与代码注释使用中文，标识符、命令、报错原文保持原样。
-## 项目背景
+3. **`src/language/system-language.ts` 只有 macOS 分支**：读取 `AppleLanguages` 的探测仅 macOS 生效，其它平台返回空数组并回退到宿主的 locale 解析；改语言逻辑时不要假设该模块在 Windows 有输出，否则 Windows 上的语言提示段会一直是空的。
+4. **路径处理一律用 `node:path`**：不要拼接 `/` 或假设大小写不敏感，Windows 上的分隔符与大小写规则不同；测试里的固定路径字符串（如 `/tmp/fixture`）只作为传入假 provider 的不透明值。
+5. 文档与代码注释使用中文，标识符、命令、报错原文保持原样：翻译过的命令和报错搜不到、跑不通。
 
-DSH 编程智能体插件，工程化任务编排机制，Codex 五段式契约层层推进；默认三个 worker 跟随主代理当前模型（`auto`），可在插件页分别给 planner / implement / verify 指定模型以做 Pro/Flash 分工，确保任务交付质量和 Token 价值最大化。
-
-使用者看 [README](README.md)；为什么这样设计见 [docs/DETAIL.md](docs/DETAIL.md)。
-
-按目录阅读（上游 `agent-instructions` 会在触碰对应目录文件时自动注入子文件）：
-
-- 改 `src/` 前先读 [src/AGENTS.md](src/AGENTS.md)（DSH 契约表、约束 1-23、src 模块表、调试表）。
-- 改 `test/` 前读 [test/AGENTS.md](test/AGENTS.md)（测试矩阵、验证步骤）。
-- 改 `scripts/` 前读 [scripts/AGENTS.md](scripts/AGENTS.md)（构建流程与挂载调试）。
 ## 模块索引
 
 | 模块 | 路径 | 文档 |
 | --- | --- | --- |
-| lib | `lib` | [AGENTS.md](lib/AGENTS.md) |
 | src | `src` | [AGENTS.md](src/AGENTS.md) |
 | test | `test` | [AGENTS.md](test/AGENTS.md) |
+| scripts | `scripts` | [AGENTS.md](scripts/AGENTS.md) |
