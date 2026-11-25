@@ -24,7 +24,7 @@ import {
   type CodingCheckpoint,
   type CodingMode,
   type CodingStage,
-} from '../stages.js'
+} from '../core/stages.js'
 
 /** Definition kind; also the renderer key in `conversation.chat.node`. */
 export const CAPSULE_KIND = 'coding-stage'

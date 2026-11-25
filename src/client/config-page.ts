@@ -18,7 +18,7 @@
  */
 import { createElement as h, useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
-import { WORKER_AUTO, isWorkerAuto } from '../worker-auto.js'
+import { WORKER_AUTO, isWorkerAuto } from '../config/worker-auto.js'
 import type { CodingKey } from './locales.js'
 
 /** Settings namespace key: the bundle row id. */

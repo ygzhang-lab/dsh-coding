@@ -24,14 +24,14 @@ import {
   CODING_PROJECTION_KEY,
   type CodingStageView,
   type CodingVerificationView,
-} from '../coding-projection.js'
+} from '../projections/coding-projection.js'
 import {
   REASONING_PROJECTION_KEY,
   type ReasoningProjectionState,
   type ReasoningTurn,
-} from '../reasoning-projection.js'
-import { levelForEffort, type ReasoningLevel } from '../reasoning-levels.js'
-import { STAGES_BY_MODE, type CodingMode, type CodingStage } from '../stages.js'
+} from '../projections/reasoning-projection.js'
+import { levelForEffort, type ReasoningLevel } from '../reasoning/reasoning-levels.js'
+import { STAGES_BY_MODE, type CodingMode, type CodingStage } from '../core/stages.js'
 import { commandRejected } from './command-row.js'
 import type { CodingKey } from './locales.js'
 

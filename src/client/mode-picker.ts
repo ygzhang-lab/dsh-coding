@@ -15,8 +15,8 @@
  */
 import { createElement as h, memo, useState } from 'react'
 import type { ReactElement } from 'react'
-import { CODING_PROJECTION_KEY, type CodingStageView } from '../coding-projection.js'
-import type { CodingMode } from '../stages.js'
+import { CODING_PROJECTION_KEY, type CodingStageView } from '../projections/coding-projection.js'
+import type { CodingMode } from '../core/stages.js'
 import { commandRejected } from './command-row.js'
 import type { CodingKey } from './locales.js'
 
