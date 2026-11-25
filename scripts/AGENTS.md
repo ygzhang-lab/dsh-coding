@@ -2,6 +2,14 @@
 
 本文件只服务 `scripts/` 下的改动。构建产物表、发布步骤与跨平台说明见根 [AGENTS.md](../AGENTS.md)。
 
+## scripts/ 的目标与成功标准
+
+这个目录只服务两件事：一是让构建产物可复现（`pnpm build` 每次都从 `src/` 生成同一份 `lib/`），二是让本地挂载与隔离探针不碰用户 profile，并且结论别人能照着命令重跑出来。
+
+成功标准：探针只在临时 `DSH_HOME` 里跑并把关键事实打印出来，挂载步骤逐字可复制，改动生效规则写得能直接判断「要不要重启」。
+
+违反这条会把用户的开发环境搞坏：去逆向 `app.asar` 的安装流程，或拿真实的 `desktop` profile 再起一个 Host，会和正在运行的 App 共用同一份 profile 的存储与文件锁，轻则插件加载到旧产物，重则 profile 写坏。所以下面每个命令都写清它动的是哪个目录。
+
 ## 隔离挂载探针
 
 `scripts/mount-probe.mjs` 在临时 `DSH_HOME` 下创建 `base + dsh-coding` 的探测 profile，启动真实 Host，读取预设花名册并像会话控制器一样 `mount` Coding 预设，打印可见工具与 `settings.describe()` 命名空间；不动用户 profile。
@@ -27,8 +35,9 @@ DSH_HOME="$H" ELECTRON_RUN_AS_NODE=1 \
 探针额外打印三项关键事实：`prompt context coding:language`（语言提示段）、`projection dshCodingStage`（卡片数据源是否注册）、`after agent-preset/selected`（选中 Coding 后投影是否 `active: true`）。
 
 ## 本地插件开发 profile 挂载（开发用）
-- 1.  检查 DSH 正在使用的 profile （默认 `desktop`），如果已安装 NPM 版本的 DSH Coding 插件，就先把他卸载；
-- 2.  检查 DSH 正在使用的 profile （默认 `desktop`），如果已通过 link 方式挂载此插件项目，就忽略下方的操作（无需重复挂载）。否则就把工作区挂载进正在使用的 profile（默认 `desktop`），`link:` 直接读本仓库产物，改完不重装。**照下面三步做，不要去逆向 `app.asar` 的安装流程、不要读整个 `node_modules`、不要用真实 `desktop` profile 再起一个 Host**（会和正在运行的 App 共用同一份 profile 的存储与文件锁）
+
+1. 检查 DSH 正在使用的 profile（默认 `desktop`），如果已安装 NPM 版本的 DSH Coding 插件，就先把他卸载。
+2. 检查 DSH 正在使用的 profile（默认 `desktop`），如果已通过 link 方式挂载此插件项目，就忽略下方的操作（无需重复挂载）。否则就把工作区挂载进正在使用的 profile（默认 `desktop`），`link:` 直接读本仓库产物，改完不重装。**照下面三步做，不要去逆向 `app.asar` 的安装流程、不要读整个 `node_modules`、不要用真实 `desktop` profile 再起一个 Host**（会和正在运行的 App 共用同一份 profile 的存储与文件锁）。
 
 前置：项目侧依赖与产物就位（`lib/` 是构建产物，缺了挂上也起不来）。
 
