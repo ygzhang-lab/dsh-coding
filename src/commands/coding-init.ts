@@ -7,8 +7,8 @@
  * 1. **四分支写死在 {@link branchFor} 里**：根文档不存在就生成；存在且没有 `-update`
  *    就跳过并提示；存在且有 `-update` 才做章节级增量更新；不存在却带了 `-update`
  *    降级为生成。
- * 2. **正文来自模型，插件只管结构**：每篇文档先用 `lib/agents-doc` 从 `lib/project-scan`
- *    的 {@link ProjectFacts} 渲染出确定性草稿，再把草稿、现有文档与 `lib/doc-context`
+ * 2. **正文来自模型，插件只管结构**：每篇文档先用 `docgen/agents-doc` 从 `docgen/project-scan`
+ *    的 {@link ProjectFacts} 渲染出确定性草稿，再把草稿、现有文档与 `docgen/doc-context`
  *    组装的有界材料交给注入的 {@link DocGenerate}。**新建**不套模板：`composeGeneratedDoc`
  *    只拼插件前置块（标题行 / 上级引用）与模型返回的 `##` 章节，模型顺序即写入顺序，末尾的
  *    「模块索引」由插件生成；模型没返回的模板章节一律不补。**更新**则用 `applyModelSections`
@@ -20,12 +20,12 @@
  * 3. **先算完所有文档，再统一写盘**：所有模型调用先在 `pending` 里排队，任一失败就一个
  *    文件都不写；全部成功后才按「模块文档 → 项目级文档」的顺序落盘。
  *
- * 空项目闸门排在一切之前：`lib/project-scan` 的 `listSourceFiles` 找不到任何源码文件时
+ * 空项目闸门排在一切之前：`docgen/project-scan` 的 `listSourceFiles` 找不到任何源码文件时
  * 只回一句提示，既不扫描模块，也不读写文档、不调用模型。
  *
  * I/O 与变更来源全部可注入：文档读写优先走 DSH 内置 fs 服务（`ctx.fs` 的
  * `resolve` / `stat` / `readText` / `writeText`），服务缺失时回退 `node:fs/promises`；
- * 变更文件列表默认走 `lib/git` 的 `getChangedFiles`（内部用 `spawn` + 固定 argv，不经 shell）。
+ * 变更文件列表默认走 `docgen/git` 的 `getChangedFiles`（内部用 `spawn` + 固定 argv，不经 shell）。
  * 测试可以整体替换 `resolveFs` / `statFile` / `modifiedSince` / `getChangedFiles` /
  * `generate` / `listSources`，命令本身也从不抛错 —— 异常统一收成 `{ kind: 'error' }` 回执。
  *
@@ -49,7 +49,7 @@ import {
   writeFile as nodeWriteFile,
 } from 'node:fs/promises'
 import { join } from 'node:path'
-import { initText, type InitText } from '../command-text.js'
+import { initText, type InitText } from './command-text.js'
 import {
   affectedProjectSections,
   applyModelSections,
@@ -65,17 +65,17 @@ import {
   renderModuleDoc,
   renderProjectDoc,
   sectionBody,
-} from '../lib/agents-doc.js'
-import { buildDocPrompt } from '../lib/doc-context.js'
-import { getChangedFiles as defaultGetChangedFiles, type ChangedFilesResult } from '../lib/git.js'
+} from '../docgen/agents-doc.js'
+import { buildDocPrompt } from '../docgen/doc-context.js'
+import { getChangedFiles as defaultGetChangedFiles, type ChangedFilesResult } from '../docgen/git.js'
 import {
   getFilesModifiedSince,
   listSourceFiles,
   scanProject as defaultScanProject,
   type ProjectFacts,
   type ProjectModule,
-} from '../lib/project-scan.js'
-import type { PromptLanguage } from '../language.js'
+} from '../docgen/project-scan.js'
+import type { PromptLanguage } from '../language/language.js'
 
 /**
  * 空项目提示：一个源码文件都没有时只回这一句。
@@ -105,7 +105,7 @@ export interface CodingInitPayload {
   readonly signal?: AbortSignal
 }
 
-/** 一次模型生成请求：提示词由 `lib/doc-context` 组装，`draft` 是同一份草稿供调用方核对。 */
+/** 一次模型生成请求：提示词由 `docgen/doc-context` 组装，`draft` 是同一份草稿供调用方核对。 */
 export interface DocGenerateRequest {
   readonly agent: unknown
   readonly signal?: AbortSignal
@@ -197,7 +197,7 @@ export interface CodingInitDeps {
   readonly resolvePolicy?: (agent: unknown) => unknown | Promise<unknown>
   /** 单文件 mtime 读取（非 git 的 `-update` 用它当基线）；缺省用 `node:fs/promises.stat`。 */
   readonly statFile?: (path: string) => Promise<{ readonly mtimeMs: number }>
-  /** 取基线之后修改过的本地文件；缺省用 `lib/project-scan` 的 `getFilesModifiedSince`。 */
+  /** 取基线之后修改过的本地文件；缺省用 `docgen/project-scan` 的 `getFilesModifiedSince`。 */
   readonly modifiedSince?: (
     root: string,
     baselineMs: number,

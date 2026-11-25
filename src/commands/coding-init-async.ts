@@ -8,7 +8,7 @@
  *    空项目只回 `initText(...).emptyProject`；`checkDocRoute` 预检本会话当前模型 → 读不到路由
  *    只回 error。两种失败都在这里收口，**不启动后台、不调用 `run`**。
  * 2. **单飞 + 后台**：`WeakSet` 记录在途 agent，重复触发同步回一句提示，绝不启动第二个任务；
- *    否则标记在途、交给 `lib/background-task` 的后台运行器，并把 `run` 的最终回执包成
+ *    否则标记在途、交给 `docgen/background-task` 的后台运行器，并把 `run` 的最终回执包成
  *    `agent.followup(controlMessage(...))` 送回会话。
  *
  * 后台任务只用运行器给的 signal（maintenance 名额或独立超时），**绝不透传命令 payload 里的
@@ -21,18 +21,18 @@
  *
  * @module dsh-coding/commands/coding-init-async
  */
-import { createBackgroundRunner, type BackgroundRunner } from '../lib/background-task.js'
-import { checkDocRoute, type DocRouteCheck } from '../lib/doc-model.js'
-import { listSourceFiles } from '../lib/project-scan.js'
-import { controlMessage } from '../messages.js'
-import { initText, type InitText } from '../command-text.js'
+import { createBackgroundRunner, type BackgroundRunner } from '../docgen/background-task.js'
+import { checkDocRoute, type DocRouteCheck } from '../docgen/doc-model.js'
+import { listSourceFiles } from '../docgen/project-scan.js'
+import { controlMessage } from '../core/messages.js'
+import { initText, type InitText } from './command-text.js'
 import {
   parseCodingInitArgs,
   workspaceOf,
   type CodingInitPayload,
   type CodingInitResult,
 } from './coding-init.js'
-import type { PromptLanguage } from '../language.js'
+import type { PromptLanguage } from '../language/language.js'
 
 /** 提交通道的依赖；`run` 是唯一必填项，其余都有生产缺省实现。 */
 export interface CodingInitSubmitterDeps {
