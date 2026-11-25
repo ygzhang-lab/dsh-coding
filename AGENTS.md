@@ -78,3 +78,21 @@ pnpm publish          # prepublishOnly 会再跑一遍 typecheck/build/test
 3. **`src/system-language.ts` 只有 macOS 分支**：读取 `AppleLanguages` 的探测仅 macOS 生效，其它平台返回空数组并回退到宿主的 locale 解析；改语言逻辑时不要假设该模块在 Windows 有输出。
 4. **路径处理一律用 `node:path`**：不要拼接 `/` 或假设大小写不敏感；测试里的固定路径字符串（如 `/tmp/fixture`）只作为传入假 provider 的不透明值。
 5. 文档与代码注释使用中文，标识符、命令、报错原文保持原样。
+## 项目背景
+
+DSH 编程智能体插件，工程化任务编排机制，Codex 五段式契约层层推进；默认三个 worker 跟随主代理当前模型（`auto`），可在插件页分别给 planner / implement / verify 指定模型以做 Pro/Flash 分工，确保任务交付质量和 Token 价值最大化。
+
+使用者看 [README](README.md)；为什么这样设计见 [docs/DETAIL.md](docs/DETAIL.md)。
+
+按目录阅读（上游 `agent-instructions` 会在触碰对应目录文件时自动注入子文件）：
+
+- 改 `src/` 前先读 [src/AGENTS.md](src/AGENTS.md)（DSH 契约表、约束 1-23、src 模块表、调试表）。
+- 改 `test/` 前读 [test/AGENTS.md](test/AGENTS.md)（测试矩阵、验证步骤）。
+- 改 `scripts/` 前读 [scripts/AGENTS.md](scripts/AGENTS.md)（构建流程与挂载调试）。
+## 模块索引
+
+| 模块 | 路径 | 文档 |
+| --- | --- | --- |
+| lib | `lib` | [AGENTS.md](lib/AGENTS.md) |
+| src | `src` | [AGENTS.md](src/AGENTS.md) |
+| test | `test` | [AGENTS.md](test/AGENTS.md) |

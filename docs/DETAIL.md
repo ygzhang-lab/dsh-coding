@@ -218,14 +218,40 @@ worker 预设的插件列表（`cordis.patch.yml`）就是它们的权限清单�
 
 ### 2.8 交接文档：把本轮结果落成一篇 Markdown
 
-`/coding memory` 把本轮状态机与交接记录写成一篇中文 Markdown，落到 `<会话 cwd>/.agents/memory/<清洗后的 sessionId>-<UTC YYYYMMDD-HHmmss>.md`。
+`/coding memory` 把本轮状态机与交接记录写成一篇中文 Markdown，落到 `<会话 cwd>/.agents/memory/<UTC YYYYMMDD-HHmmss>-<清洗后的会话标题>.md`。
 
 - **触发条件**：会话控制卡片只为「最新一轮（live）+ codex 模式 + 该轮冻结阶段为 `deliver` + 该轮验证通过」的轮次渲染「结束任务并生成交接文档」按钮（英文 `End task & write handoff`）；历史轮、非 codex 轮、验证未通过或 BLOCKED 交付的轮次没有按钮。点击后进入卡片内二次确认（「确认生成」/「取消」），不是系统弹窗；确认后经 `remote.commands.execute(sessionId, '/coding memory', [])` 回流 Host。
 - **命令与写入路径**：`/coding memory` → `src/memory.ts` 的 `writeMemoryDocument` → 从 `agent.ctx` / 插件 `ctx` 取 `fs` 服务 → `fs.resolve('.agents/memory/<文件名>', { cwd, signal })` 得到 `{ targetKey, displayPath }` → `fs.writeText(target, content, { kind: 'createIfAbsent' }, signal, policy)`。DSH 的写入实现会 `mkdir(dirname, { recursive: true })`，所以 `.agents/memory` 不存在时自动创建。命令处理器是 async：结果以 `command/done` 的 `{kind, text}` 持久记录，成功收据是 `handoff document written: <displayPath> (session <sessionId>)`。
-- **文件名**：`memoryFileName(sessionId, at)` 把 sessionId 里 `[^A-Za-z0-9._-]` 的字符换成 `-`（清洗后为空用 `session`），时间戳取 UTC 的 `YYYYMMDD-HHmmss`，扩展名 `.md`；重复点击各写一篇新文件，`createIfAbsent` 不覆盖已有文件。
+- **文件名**：`memoryFileName(title, at)` 把 UTC 时间戳 `YYYYMMDD-HHmmss` 放在最前，再接清洗后的会话标题，扩展名 `.md`；时间在前，`listDir` 的名字字典序即时间序，取最新一篇不需要索引文件。标题取 `sessionTitle` 服务的 `get(session).title`（`SessionTitleSnapshot.title`），服务缺失、抛错或读到空串时回退 `handoff.goal`，再回退 `session`。清洗规则：Windows 非法字符 `<>:"/\|?*` 与控制字符换成空格，空白与 `.` 折叠成 `-`，连续 `-` 合并并去掉首尾 `-`，再按**码点**截到 `MEMORY_TITLE_LIMIT`（40 字符，不切出半个代理对）；清洗后仍为空用 `session`。重复点击各写一篇新文件，`createIfAbsent` 不覆盖已有文件。
+- **读取（跨会话接手）**：`/coding memory open [关键词]` → `readLatestMemory` → `fs.resolve('.agents/memory', { cwd, signal })` 得到目录目标 → `fs.listDir(dir)` 列出目录项 → 只保留文件名形如 `<YYYYMMDD-HHmmss>-…md` 的普通文件（给了关键词时再按文件名不区分大小写过滤）→ 按名字降序取第一条 → `fs.readText(target, signal)` 读出正文 → `agent.steer(controlMessage(text, 'archived handoff: <文件名>'))` 注入当前会话。注入文案说明这是**存档快照**、只读，实时状态以 `coding_handoff` 与当前状态机为准，并要求从目标、验收标准、交付记录、后续跟进开始接手、不重做已记录为交付的工作；正文夹在 `--- begin archived handoff document: <文件名> ---` 与对应的结束标记之间。成功收据是 `handoff document loaded: <displayPath>`。接手**不改变 stage / mode、不改状态机、不新增 Session 事件**，只在用户显式执行命令时发生。
 - **内容**：标题与头部（会话、生成时间（UTC）、工作目录、模式 / 阶段、轮次、状态为正常交付或阻塞交付（BLOCKED）），随后按「有内容才输出」追加章节：目标、约束、验收标准、交付记录、后续跟进、决策、发现、待答问题、任务清单、交接任务、改动文件、未并表的改动路径、验证、阶段轨迹，以及固定的「下一轮怎么接」。空章节整节省略（不写「无」）。文档只取状态机与 `coding_handoff` 记录加会话头部（cwd / sessionId），**不回读对话正文**，也不新增 Session 事件；超过 `MEMORY_LIMIT`（20000 字符）截断到最后一个完整行并标注「文档已截断」。
-- **失败处理**：缺 `fs` 服务、会话没有 cwd、写入抛错（同名文件已存在、沙箱不允许等）都收成 `{ ok: false, reason, action }`，命令渲染为 `{kind:'error', text: '<原因> — <处理>'}` 收据；不抛未捕获异常。卡片侧失败显示「未能生成交接文档，请重试或执行 /coding memory。」。
+- **失败处理**：缺 `fs` 服务、会话没有 cwd、写入抛错（同名文件已存在、沙箱不允许等），以及读取侧的缺 `fs` 服务、无 cwd、目录尚不存在（首次使用）按空存档处理（报 `no handoff document under .agents/memory`，不当作文件系统故障）、目录为空（`no handoff document under .agents/memory`）、关键词无匹配（`no handoff document matches "<关键词>"`）、读盘抛错（`listDir` / `readText` 失败）都收成 `{ ok: false, reason, action }`，命令渲染为 `{kind:'error', text: '<原因> — <处理>'}` 收据；不抛未捕获异常。卡片侧失败显示「未能生成交接文档，请重试或执行 /coding memory。」。
 - **边界**：按钮只生成文档，**不结束会话、不改变 stage / mode、不停止任何运行时状态**；需要收尾任务时按原有方式让本轮正常结束。
+
+### 2.9 `/coding` 命令文案与语言
+
+用户可见文案集中在 `src/command-text.ts`，按会话语言输出中文或英文。
+
+- **文案表**：`commandText(language)` 覆盖 `/coding` 主命令（状态、重置、`memory` 写入/读取、未知阶段与模式、阶段与模式切换、门禁拒绝、异常收尾、命令描述与 `input.hint`）；`initText(language)` 覆盖 `/coding init`（空项目、`FS_STALE_VERSION`、无模型、无可用章节、headline 与 notes、后台立即回执、完成/失败通知与通知摘要）。
+- **语言来源**：`src/language.ts` 的 `resolveHostLanguage`（插件 `language` 配置 → DSH 界面 locale → 系统语言 → 宿主 locale），`preset.ts` 的 `currentLanguage()` 是唯一入口。英文文案是既有回执的逐字文本、中文为翻译，所以升级不会改变英文用户看到的字符串。
+- **取文时机**：命令描述与 `input.hint` 在 `ctx.inject(['commands'])` 注册时取一次语言，运行中切换界面语言需重启 DSH 才生效；回执则每次命令调用都按当时的语言出文。
+- **`/coding init` 的 `language` 依赖**：可选、缺省 `zh`，直接构造处理器（测试、二次开发）时保持既有中文回执，preset 接线显式传 `() => currentLanguage()`。
+- **边界**：模型面向的契约（`src/contract.ts`、阶段上下文、worker 提示词、`controlMessage` 注入正文）保持英文；fs 与模型抛错原文不翻译，只翻译插件自己的原因与处理办法；客户端卡片文案仍由 `src/client/locales.ts` 按 DSH 界面语言提供。
+
+### 2.10 `/coding init`：用模型生成项目级 / 模块级文档
+
+`/coding init [-update] [-modules]` 生成或增量更新 `AGENTS.md`，正文由本会话当前模型撰写，插件只负责结构、上限与写盘守卫。
+
+- **入口与参数**：唯一的入口是 `/coding` 的 `init` 子命令（独立的旧命令已删除）；不带参数时缺文档就生成、已存在就跳过并提示 `-update`；`-update` 做章节级增量更新；`-modules` 逐个模块处理模块级文档。命令注册在 `src/preset.ts` 的 `/coding` 处理器里（那里才有 `ctx.llm`、`agent` 与沙箱策略），`src/index.ts` 不再注册它；命令层只做轻量预检与回执（`src/commands/coding-init-async.ts`），真正的生成与写盘在后台跑（`src/commands/coding-init.ts`）。`/coding` 的 `description` 与 `input.hint` 同步列出该子命令。
+- **空项目闸门**：`listSourceFiles`（`src/lib/project-scan.ts`，复用既有源码扩展名与排除目录、带深度与文件数上限）在项目里找不到任何源码文件时，命令只回一行「未检测到代码文件，已跳过：/coding init 需要项目里至少有一个源码文件。」，既不扫描模块，也不读写文档、不调用模型。同一份枚举结果也是模型上下文里的代码摘录来源。
+- **模块边界最多两级**：启发式模块探测（`scanProject` 的 `walkByHeuristic`）用 `moduleDirOf` 把三段及更深的候选目录收敛到它的二级祖先目录，所以 `src/http`、`src/http/lib`、`src/http/test`、`src/http/api` 现在只算一个模块 `src/http`，不再向下拆分——否则每层子目录都会被当成独立模块，模块文档数量与「模块索引」会随目录深度爆炸。显式 workspace 声明（`pnpm-workspace.yaml`、`package.json` 的 `workspaces`、`lerna.json` 等）走 `walkByPatterns`，其模块路径保持原样、不做收敛：显式声明本身就是使用者划定的模块边界。无 manifest 的二级目录仍生成 `kind: 'unknown'`、`name = basename`、`entries: []` 的模块事实，证据不足照旧省略而不猜测。
+- **模型输入（五项，全部有界）**：现有文档正文（更新时）、项目事实与确定性草稿、源码与 README / docs 的有界摘录、变更文件列表（更新时）、模块路径与模块内文件（模块级）。组装在 `src/lib/doc-context.ts` 的 `buildDocPrompt`：整份 user 文本上限 `DOC_CONTEXT_TOTAL_LIMIT`（60000 字符），单个文件摘录 `DOC_CONTEXT_EXCERPT_CHARS`（2500 字符），参与摘录的源码文件最多 `DOC_CONTEXT_MAX_FILES`（24 个），README / docs 与贡献指南另取固定篇数；超限一律带截断标记硬截断，不会把整仓塞进提示词。该模块是纯模块，不 import `node:fs`。
+- **模型路由**：走本会话当前模型（`leadRouteOf(agent)` → `ctx.llm.prepareCall` → `prepared.stream` → `BlockAssembler`，实现在 `src/lib/doc-model.ts`，输出上限 8000 token）。只读提示，不派子代理、不进对话 Turn、不新增配置字段或 worker 预设，也没有任何回退路由；模型读不到、调用失败、流被中断 / 截断或正文为空都收成 `ok:false`，命令层收成 error 回执（`模型生成失败：<原因> — <处理>`，异步路径下由后台通知送回会话）且**一个文件都不写**，绝不静默回退成模板渲染。
+- **按章节分批生成**：整篇长文档一次性生成会撞上路由 8000 token 的输出上限，于是 `ask` 先用纯函数 `planSectionBatches`（`src/lib/agents-doc.ts`）把本次允许撰写的章节按原顺序切成每批至多 `BATCH_MAX_SECTIONS`（4）章的连续批次——项目级新建 = `PROJECT_WRITABLE_SECTIONS`（`PROJECT_SECTIONS` 去掉插件自有的「模块索引」）12 章 3 批，模块级新建 / 更新 = `MODULE_SECTIONS` 10 章 3 批，项目级更新 = 本次允许改写的章节（通常 1 批）。每批提示词只列本批章节（`buildDocPrompt` 的可选 `sections`），并加一条「只输出列出的这几章、本批 60 行以内（约 2-3k token）」的硬规则，单批输出因此落在 2-3k token 量级；不传 `sections` 时提示词与不分批时逐字一致。分批器只做切片：不重排、不去重、不丢章节，空数组返回空数组；各批正文去空白后按批次顺序用空行拼接。拼接结果仍**只**走一次 `composeGeneratedDoc`（新建）或一次 `applyModelSections`（更新），零占位符、150 行上限、模型无可用章节即失败等既有语义不变。任一批失败立即整体失败，reason 前缀 `第 N/M 批：`，此时还没往写盘队列写任何东西，所以**一个文件都不写**（两阶段写盘不变）：拿到的是整份失败而不是半份文档，重跑一条命令即可重试。
+- **输出合并（不套固定模板）**：最终文档 = 插件标题行 `# AGENTS.md — <name>`（模块文档再前置一行 `> 上级：…`）+ 模型返回的 `##` 章节（**保留模型顺序**）+ 插件按模块事实生成的「模块索引」表。模型没返回的模板章节不补写，也不按模板章节表重排；同名章节只保留第一次出现，模型自带的「模块索引」一律丢弃。模板渲染 `renderProjectDoc` / `renderModuleDoc` 只作为提示词里的「参考草稿」，从不充当写盘骨架。更新保留旧文档的章节顺序与模型未返回的章节，模型返回的已有标题仅在被允许替换时替换（项目级 = 受影响章节，由 `affectedProjectSections` 判定；模块级 = 模块章节表），新标题按模型顺序追加到末尾，没有可应用章节时整篇不动。写出前 `scrubPlaceholders` 按行清除 `<!-- TODO: 待补充 -->` 与 TODO 占位行，再经 `isEmptyDocBody` / `pruneEmptySections` 把清空后的章节整节删除，所以写出的文档零占位符；生成由 `composeGeneratedDoc`、更新由 `applyModelSections` 组装，结果统一截断到 150 行。回执不再统计「待补充」数量。
+- **异步编排**：命令只做同步可判的轻量预检——空项目（`listSourceFiles` 找不到源码文件）与读不到本会话模型（`checkDocRoute`）直接同步回执、不启动后台；其余情况立刻交回「已开始文档生成（后台执行；模型 <route>）。完成或失败后会在会话里反馈。」，界面不再卡在同步等待。后台任务优先借 `agent.runMaintenance(signal => …)` 的宿主维护名额，agent 忙到同步抛错时退回普通 detached Promise + 独立超时（`BACKGROUND_TIMEOUT_MS`，默认 10 分钟）；每个 agent 同时只允许一个在途任务，重复触发同步回一句提示。完成或失败经 `agent.followup(controlMessage(text, '文档生成回执'))` 送回会话，正文写明结果、写出的文件 / 模型路由或失败原因与下一步，并注明「这是运行时回执，无需调用工具，也不要改动任何文件」。后台任务**不使用命令 payload 的 signal**（命令 settle 后它会被 abort），只用运行器给的 maintenance signal 或独立超时；任务与通知的 rejection 一律吞掉，不产生 unhandled rejection。
+- **两阶段写盘与 fs 守卫**：所有模型调用（模块文档 + 项目级文档）都成功后才按「模块文档 → 项目级文档」顺序落盘，任一失败就提前返回、不产生半成品。读写都走 `ctx.fs` 的 `resolve` / `stat` / `readText` / `writeText`：新建用 `{ kind: 'createIfAbsent' }`，覆盖用 `{ kind: 'replaceIfVersion', version }`，沙箱策略（`sandboxPolicy.resolve({ session })`）原样透传；生成期间文档被人改过时报 `FS_STALE_VERSION`，换成「文件在本次生成期间被修改（FS_STALE_VERSION），未覆盖；请重试 /coding init -update。」回执而不是覆盖。非 git 仓库不报错：`-update` 改用根文档 mtime 当基线比对本地文件，回执说明未使用 diff。
+- **回执格式**：单行首句是本次主操作，多行时逐条追加模块结果与说明。生成写 `已生成 AGENTS.md（模型 provider/model）。`；更新写 `已更新 AGENTS.md（章节：快速开始、目录结构；模型 provider/model）。`；跳过写 `AGENTS.md 已存在，已跳过。如需更新请用 /coding init -update。`；模块级按路由聚合成 `已生成模块文档：packages/a（模型 provider/model）。`，插件自己回写索引时附 `已回写「模块索引」。`；有写盘再补一行 `共写入 N 篇文档。`，不再统计待补充数量。忙时重复触发回 `已有一个文档生成任务在运行；完成或失败后会在这里反馈，请稍后再试。`。
 
 ## 3. 阶段化交付契约
 

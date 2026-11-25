@@ -2,6 +2,34 @@
 
 本文件记录 DSH Coding 编程智能体的版本变更。版本号遵循语义化版本（`MAJOR.MINOR.PATCH`），`rc` 后缀表示预发布版本；小节按发布时间倒序排列，最新的版本在最前。
 
+## 未发布
+
+### 新增
+
+- `/coding init [-update] [-modules]`：用本会话当前模型生成或增量更新项目级与模块级 `AGENTS.md`；`-modules` 逐个模块处理模块级文档，`-update` 只改受影响章节。模型输入包含现有文档正文（更新时）、项目事实与确定性草稿、源码与 README/docs 的有界摘录、变更文件列表（更新时）以及模块路径与模块内文件（模块级），总字符与单文件摘录都有上限。
+- 空项目（没有任何源码文件）只回一行提示：不扫描模块、不读写文档、不调用模型。
+- 模型输出只取 `##` 章节（项目级不写「模块索引」，该表由插件回写），章节与顺序由模型按项目内容决定；更新时未受影响章节逐字保留，结果截断到 150 行；模型读不到或调用失败时返回 error 回执且不写文件。
+- 两阶段写盘：所有模型调用成功后才按「模块文档 → 项目级文档」落盘，写入走 `ctx.fs` 的 `createIfAbsent` / `replaceIfVersion` 守卫并透传沙箱策略。
+- 新增 `src/lib/project-scan.ts` 的 `listSourceFiles`（有界源码枚举，同时供空项目闸门与模型上下文使用）、`src/lib/doc-context.ts`（提示词组装与摘录上限）、`src/lib/doc-model.ts`（一次性模型调用）。
+- `/coding init` 按章节分批调用模型：`src/lib/agents-doc.ts` 新增 `BATCH_MAX_SECTIONS`（4）、`PROJECT_WRITABLE_SECTIONS`（项目级 12 章，去掉插件自有的「模块索引」）与纯函数分批器 `planSectionBatches`（按顺序切片、不重排不去重、空数组返回空数组），`doc-context` 的 `DocPromptInput` 新增可选 `sections`：每批提示词只列本批章节并要求「本批 60 行以内（约 2-3k token）」。项目级新建 = 12 章 3 批，模块级新建 / 更新 = 10 章 3 批，项目级更新 = 本次允许改写的章节（通常 1 批）。
+- 目录模块探测最多两级：启发式扫描把三段及更深的候选目录收敛到二级祖先，`src/http`、`src/http/lib`、`src/http/test`、`src/http/api` 只算一个模块 `src/http`（`src/lib/project-scan.ts` 的 `moduleDirOf`）。
+
+### 变更
+
+- 文档生成入口由独立命令收敛为 `/coding init [-update] [-modules]` 子命令，`/coding` 的 `description` 与 `input.hint` 同步；命令注册从 Host bundle 移到 preset（`ctx.llm`、`agent` 与沙箱策略都在那里），`src/index.ts` 不再注册该命令。
+- 项目级与模块级文档的正文改由本会话当前模型生成（`leadRouteOf` → `ctx.llm.prepareCall` → `prepared.stream` → `BlockAssembler`），不再回退为模板渲染；模型路由不新增配置字段或 worker 预设，也不做回退。
+- `/coding init` 异步化：命令只做轻量预检（空项目、读不到本会话模型同步回执），其余立即返回「已开始文档生成（后台执行；模型 <route>）」，不再同步等待模型；后台优先 `agent.runMaintenance`、agent 忙时退回 detached + 独立超时、每 agent 单飞，完成或失败经 `agent.followup(controlMessage(text, '文档生成回执'))` 通知（正文注明这是运行时回执、无需调用工具），后台不使用命令 signal。实现在新增的 `src/commands/coding-init-async.ts` 与 `src/lib/background-task.ts`。
+- 生成不再套固定模板：最终文档 = 插件标题行（模块文档另加一行上级链接）+ 模型返回的 `##` 章节（保留模型顺序）+ 插件回写的「模块索引」，模型未返回的模板章节不补写；更新保留旧文档的章节顺序与未受影响章节，模型返回的已有标题只按允许集合替换，新标题按模型顺序追加到末尾；`renderProjectDoc` / `renderModuleDoc` 仅作为提示词里的参考草稿（组装见 `composeGeneratedDoc` / `applyModelSections`）。
+- `/coding init` 的模型调用改为按章节分批执行：各批正文去空白后按批次顺序用空行拼接，拼接结果仍只走一次 `composeGeneratedDoc`（新建）或一次 `applyModelSections`（更新），零占位符与 150 行上限不变；任一批失败即整体失败，原因前缀 `第 N/M 批：`，此时尚未进入写盘阶段，仍然零写盘（不会写出半份文档）。
+- 显式 workspace 声明（`pnpm-workspace.yaml` / `package.json` 的 `workspaces` 等）的模块路径保持原样，不受两级收敛影响；无 manifest 的二级目录仍生成 `kind: 'unknown'`、`name = basename`、`entries: []` 的模块事实。
+- 交接文档改名为 `<UTC YYYYMMDD-HHmmss>-<清洗后的会话标题>.md`：时间戳在前，`listDir` 的名字字典序即时间序；标题取 `sessionTitle` 服务的 `get(session).title`，缺失 / 抛错 / 空串时回退 `handoff.goal`，再回退 `session`，清洗 Windows 非法字符与控制字符、空白与 `.` 折叠成 `-`、按码点截到 40 字符。
+- 新增 `/coding memory open [关键词]` 跨会话接手：只读 `.agents/memory` 下的存档，按文件名不区分大小写过滤后取名字最大的一篇，经 `agent.steer(controlMessage(…))` 注入当前会话，并声明它是存档快照、实时状态以 `coding_handoff` 为准；不改变 stage / mode / 状态机，不新增 Session 事件。
+- `/coding` 命令面改为中英双语：新增 `src/command-text.ts`（`commandText` / `initText`），命令描述、`input.hint`、全部回执、`/coding memory` 的固定原因与处理办法、`/coding init` 的回执与后台通知都按会话语言输出；英文文案保持既有逐字文本，中文为新增翻译；模型面向的契约与注入正文仍为英文，命令描述在注册时定型（切换界面语言需重启 DSH）。
+
+### 修复
+
+- 写出的 `AGENTS.md` 不再残留 `<!-- TODO: 待补充 -->` 等占位符：写出前按行清洗（`scrubPlaceholders`），清空后的章节整节移除（`isEmptyDocBody` / `pruneEmptySections`）；回执也不再统计「待补充」数量，只在有写盘时补一行 `共写入 N 篇文档。`。
+
 ## 0.1.1-rc3（已发布）
 
 对应标签 `v0.1.1-rc3`，2026-11-24 推送到 GitHub；`package.json` 当前版本为 `0.1.1-rc3`。
