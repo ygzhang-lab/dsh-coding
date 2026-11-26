@@ -1,8 +1,6 @@
 # DSH Coding 编程智能体
 
-DSH Coding 是 DSH 的编程智能体插件。它把一次工程任务分成 requirements → plan → implement → verify → deliver 五步，每一步能不能继续由插件按事实判定，模型只能提出推进请求。
-
-默认三个 worker（planner / implement / verify）跟随主代理当前模型（`auto`），也可以在插件页分别给它们指定 `provider/model`。
+DSH Coding 是 DSH 的编程智能体插件，DSH 编程智能体插件，工程化任务编排机制，Codex 五段式契约层层推进，默认三个子代理跟随主代理当前模型（auto），可分别指定 planner/implement/verify 的模型，确保任务交付质量和 Token 价值最大化。DSH programming intelligent agent plugin, engineering task orchestration mechanism, Codex five-stage contract progressing layer by layer; the three sub-agents follow the lead's current model by default (auto), and the planner/implement/verify models can be set individually, ensuring task delivery quality and maximizing Token value.。
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/ygzhang-lab/dsh-coding?style=flat&logo=github)](https://github.com/ygzhang-lab/dsh-coding)
 ![GitHub License](https://img.shields.io/github/license/ygzhang-lab/dsh-coding)
@@ -10,11 +8,15 @@ DSH Coding 是 DSH 的编程智能体插件。它把一次工程任务分成 req
 [![NPM Downloads](https://img.shields.io/npm/dy/dsh-coding)](https://www.npmjs.com/package/dsh-coding)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/zh/plugins/ygzhang-lab/dsh-coding)
 
+
+
+## 插件名和 NPM 包名
+
 插件名是 `dsh-coding`，NPM 包名是 `dsh-coding`，在 DSH 中的插件显示名是 **DSH Coding**。源码与 issue 在 [ygzhang-lab/dsh-coding](https://github.com/ygzhang-lab/dsh-coding)。
 
 ## 什么时候适合用它
 
-适合要改多个文件、要跑测试或构建的工程任务：做完没做完有判断标准，验证要真实跑过。
+适合复杂任务开发/项目搭建/模块重构/Bug修复，或要跑测试或构建的工程任务：做完没做完有判断标准，验证要真实跑过。
 
 不适合一句话问答。问一句答一句、查一段代码解释一下，用普通会话更快。
 
