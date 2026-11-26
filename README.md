@@ -1,14 +1,12 @@
 # DSH Coding 编程智能体
 
-DSH Coding 是 DSH 的编程智能体插件，DSH 编程智能体插件，工程化任务编排机制，Codex 五段式契约层层推进，默认三个子代理跟随主代理当前模型（auto），可分别指定 planner/implement/verify 的模型，确保任务交付质量和 Token 价值最大化。DSH programming intelligent agent plugin, engineering task orchestration mechanism, Codex five-stage contract progressing layer by layer; the three sub-agents follow the lead's current model by default (auto), and the planner/implement/verify models can be set individually, ensuring task delivery quality and maximizing Token value.。
+DSH Coding 是 DSH 的工程化任务编程智能体插件，Codex 五段式契约层层推进，默认三个子代理跟随主代理当前模型（auto），可分别指定 planner/implement/verify 的模型，确保任务交付质量和 Token 价值最大化。DSH programming intelligent agent plugin, engineering task orchestration mechanism, Codex five-stage contract progressing layer by layer; the three sub-agents follow the lead's current model by default (auto), and the planner/implement/verify models can be set individually, ensuring task delivery quality and maximizing Token value.。
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/ygzhang-lab/dsh-coding?style=flat&logo=github)](https://github.com/ygzhang-lab/dsh-coding)
 ![GitHub License](https://img.shields.io/github/license/ygzhang-lab/dsh-coding)
 [![NPM Version](https://img.shields.io/npm/v/dsh-coding)](https://www.npmjs.com/package/dsh-coding)
 [![NPM Downloads](https://img.shields.io/npm/dy/dsh-coding)](https://www.npmjs.com/package/dsh-coding)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/zh/plugins/ygzhang-lab/dsh-coding)
-
-
 
 ## 插件名和 NPM 包名
 
@@ -27,19 +25,19 @@ DSH Coding 是 DSH 的编程智能体插件，DSH 编程智能体插件，工程
 
 ## 特性
 
-| 特性 | 说明 |
-| --- | --- |
-| 阶段门禁由插件判定 | 模型只能请求推进，`checkAdvance` 按事实放行：只读观察、任务单、落盘编辑、最近验证通过。 |
-| 双层门禁 | `tools/pre-execute` waterfall 友好拒绝 + `ctx.tools.guard` 单调边界，共用 `checkTool`；用 `deny` 不用 `ask`。 |
-| 工具按阶段裁剪 | implement 只剩 `delegate_implement`、`coding_handoff`、`todo_write`、`bash` / `pwsh` 与控制类工具；deliver 连命令也不给。 |
-| 子代理隔离 | planner / implement / verify 各有独立上下文、工具白名单与路由，不继承主代理限制。 |
-| 模型分工 | 三个 worker 字段默认 `auto` 跟随主代理当前模型，也可分别填 `provider/model`，例如 Pro 勘探 + Flash 干活。 |
-| planner 门禁 | `requirePlanner` 默认 `complex`，任务单严格大于三条时 codex 必须先派发 `delegate_plan`；失败也算一次尝试；planner 为 `auto` 时跳过。 |
-| 有界交接 | goal / constraints / acceptance / decisions / findings / open / tasks / changes / delivered / followUps 随 checkpoint 持久化，注入 worker 时按角色裁剪。 |
-| 语义化验证 | `run_verification` 从 manifest 探测命令与包管理器（pnpm / npm / yarn / bun），命令级超时 `verificationTimeoutMs`。 |
-| 防死循环 | 失败按签名计入 `maxVerifyAttempts` / `maxSameFailure`，预算耗尽后 `coding_stage(deliver)` 只放行一次 BLOCKED 交付，验证通过才自动清零。 |
-| 状态可见 | 会话控制卡片 + 阶段胶囊，只读，控制动作走 `/coding` 命令。 |
-| 交接文档与文档生成 | `/coding memory` 把本轮结果写成 Markdown；`/coding init` 用本会话模型生成或增量更新 `AGENTS.md`（正文带固定的六条书写风格规则）。 |
+| 特性               | 说明                                                                                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 阶段门禁由插件判定 | 模型只能请求推进，`checkAdvance` 按事实放行：只读观察、任务单、落盘编辑、最近验证通过。                                                                  |
+| 双层门禁           | `tools/pre-execute` waterfall 友好拒绝 + `ctx.tools.guard` 单调边界，共用 `checkTool`；用 `deny` 不用 `ask`。                                            |
+| 工具按阶段裁剪     | implement 只剩 `delegate_implement`、`coding_handoff`、`todo_write`、`bash` / `pwsh` 与控制类工具；deliver 连命令也不给。                                |
+| 子代理隔离         | planner / implement / verify 各有独立上下文、工具白名单与路由，不继承主代理限制。                                                                        |
+| 模型分工           | 三个 worker 字段默认 `auto` 跟随主代理当前模型，也可分别填 `provider/model`，例如 Pro 勘探 + Flash 干活。                                                |
+| planner 门禁       | `requirePlanner` 默认 `complex`，任务单严格大于三条时 codex 必须先派发 `delegate_plan`；失败也算一次尝试；planner 为 `auto` 时跳过。                     |
+| 有界交接           | goal / constraints / acceptance / decisions / findings / open / tasks / changes / delivered / followUps 随 checkpoint 持久化，注入 worker 时按角色裁剪。 |
+| 语义化验证         | `run_verification` 从 manifest 探测命令与包管理器（pnpm / npm / yarn / bun），命令级超时 `verificationTimeoutMs`。                                       |
+| 防死循环           | 失败按签名计入 `maxVerifyAttempts` / `maxSameFailure`，预算耗尽后 `coding_stage(deliver)` 只放行一次 BLOCKED 交付，验证通过才自动清零。                  |
+| 状态可见           | 会话控制卡片 + 阶段胶囊，只读，控制动作走 `/coding` 命令。                                                                                               |
+| 交接文档与文档生成 | `/coding memory` 把本轮结果写成 Markdown；`/coding init` 用本会话模型生成或增量更新 `AGENTS.md`（正文带固定的六条书写风格规则）。                        |
 
 ## 它怎么工作
 
@@ -51,13 +49,13 @@ DSH Coding 是 DSH 的编程智能体插件，DSH 编程智能体插件，工程
 
 ### 阶段工具与可见范围
 
-| 阶段 | 主代理能用的工具 |
-| --- | --- |
-| 需求分析 requirements | 读文件、搜索、检查命令；不能改文件、不能验证、不能委派 |
-| 规划 plan | 读 + `delegate_plan` + `todo_write`；先用 `coding_handoff` 记录 goal，再写任务单 |
-| 实现 implement | `delegate_implement`、`coding_handoff`、`todo_write`、shell（`bash` / `pwsh`）与控制类工具 |
-| 验证 verify | 读 + `run_verification` / `delegate_verify` + `todo_write`；临时命令只复现失败 |
-| 交付 deliver | 只读汇报；可把已完成条目勾成 completed；预算耗尽时为 BLOCKED 交付 |
+| 阶段                  | 主代理能用的工具                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| 需求分析 requirements | 读文件、搜索、检查命令；不能改文件、不能验证、不能委派                                     |
+| 规划 plan             | 读 + `delegate_plan` + `todo_write`；先用 `coding_handoff` 记录 goal，再写任务单           |
+| 实现 implement        | `delegate_implement`、`coding_handoff`、`todo_write`、shell（`bash` / `pwsh`）与控制类工具 |
+| 验证 verify           | 读 + `run_verification` / `delegate_verify` + `todo_write`；临时命令只复现失败             |
+| 交付 deliver          | 只读汇报；可把已完成条目勾成 completed；预算耗尽时为 BLOCKED 交付                          |
 
 - plan 阶段没有任务单不能进入实现。任务单严格大于三条（多文件改动）时，未派发过 `delegate_plan` 不能进入实现——planner 为 `auto` 时门禁跳过，主 Agent 自身就是 planner 模型时同样跳过，单文件小改 1-3 条不强制。
 - implement 阶段能自己跑安装、`git` 与一次性命令；编辑工具被移除，改文件仍走 `delegate_implement`。
@@ -179,22 +177,6 @@ planner 用 pro 勘探现状、拆出单一职责的子任务，implement / veri
 不需要重启：`auto` 在每次派发时重新读对话框当前模型，显式路由在派发前校验 provider 与模型。验证方式：看回合卡片里的 worker 记录（role / 状态 / 摘要）与 `/coding` 状态行；派发失败时错误会指出字段名、当前路由与可用模型，按提示改完配置后重试同一派发即可。若字段是 `auto` 而主代理还没有模型选择，派发会以 `AUTO_UNAVAILABLE` 失败——先在对话框选一个模型。
 
 以上 provider id 与模型 id 都是示例：选项来自当前 DSH 已配置的模型（按 provider 逐个枚举，含 `cordis.patch.yml` 里静态声明的第三方 provider）；`auto` 是固定首项，不参与目录校验。若某个第三方 provider 的模型没有出现在下拉里，页面提示会给出未能枚举的 provider 与原因（「以下 provider 未能枚举出模型：<provider> (<原因>)」），按提示检查该 provider 的配置与凭据。保存只校验格式，真实可用性在派发时由 Host 校验；已保存但目录里没有的路由仍显示为「不在当前模型列表」并保持选中。
-
-### 升级与配置迁移
-
-- 升级不重置已有配置：插件升级只替换安装目录里的包；profile 的 `cordis.patch.yml` 里 `- id: dsh-coding` 那一行按 id 保留，行内旧值原样不动（实测从 npm 版换成本地 link 后，旧值仍在）。
-- 新增字段取 schema 默认值：新版本新增的键（例如后来的 `maxVerifyAttempts`）不必手写，行里没写该键时按默认值补齐，不会报错。
-- 删除或改名的字段被忽略：只读取 schema 认识的键，不认识的键不会让插件挂载失败。
-- 语义变化不会自动迁移：`auto` 是新语义，旧版本写死 `deepseek-account/...` 的行升级后仍是那些值——想改用 `auto` 需要手动改：插件页点**恢复默认**再保存，或直接改 yaml。
-
-| 场景                                        | 升级后行为                                     |
-| ------------------------------------------- | ---------------------------------------------- |
-| 行里已有的键                                | 原值保留，不覆盖                               |
-| 行里没有的新键                              | 取 schema 默认值                               |
-| 已被移除的键                                | 忽略，不影响挂载                               |
-| 旧默认值（如写死的 `deepseek-account/...`） | 原样保留，需要手动改成 `auto` 才跟随对话框模型 |
-
-- 验证方式：升级后打开插件页看三个字段的当前值，或在会话里用 `/coding` 看状态行；配置写错时派发会给出字段名与可用模型。
 
 ## 最佳任务实践
 
